@@ -1,0 +1,15 @@
+# Virtual Environment
+venv/
+
+# API Keys
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Project Specific
+\week4_document_analyzer_plan.md
