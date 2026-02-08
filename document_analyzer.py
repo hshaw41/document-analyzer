@@ -37,23 +37,25 @@ CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
 
 chunked_document = []
-chunk_count = math.floor(len(document) / (CHUNK_SIZE * CHARS_PER_TOKEN))
+#chunk_count = math.floor(len(document) / (CHUNK_SIZE * CHARS_PER_TOKEN))
+current_position = 0
 
-for chunk_index in range(chunk_count + 1):
+while current_position < len(document):
     #1*160000, 2*160000, ...
-    prev_split_point = chunk_index * (CHUNK_SIZE * CHARS_PER_TOKEN)
-    split_point = (chunk_index + 1) * (CHUNK_SIZE * CHARS_PER_TOKEN)
+    split_point = current_position + (CHUNK_SIZE * CHARS_PER_TOKEN)
+    clean_split_point = document.rfind(" ", current_position, split_point)
+
+    if clean_split_point == -1:
+        clean_split_point = split_point
     
-    if split_point < len(document):
-        #print(f"{prev_split_point}:{split_point}")
-        chunk = document[prev_split_point:split_point]
-    else:
-        #print(f"{prev_split_point}:{len(document)}")
-        chunk = document[prev_split_point:]
-    if len(chunk) > 0:
-        chunked_document.append(chunk)
+    chunk = document[current_position:clean_split_point]
+    chunked_document.append(chunk)
+
     print(len(chunk))
-print(len(chunked_document))
+    print(chunk[:100])
+    print()
+    
+    current_position = clean_split_point + 1
 
 # client = anthropic.Anthropic()
 
