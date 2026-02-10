@@ -4,6 +4,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 import sys
 import time
+import pymupdf
 
 load_dotenv()
 
@@ -14,8 +15,15 @@ MODEL_PRICING = {
 }
 
 MODEL = "claude-haiku-4-5"
-CHUNK_SIZE = 4000
+CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
+
+PROMPTS = {
+    "default": "You are a document summarizer. Provide concise, accurate summaries that capture the main points.",
+    "simple": "Summarize this document for someone with no technical background. Avoid jargon and use simple analogies where possible.",
+    "structured": "Summarize this document. Start with a one-sentence TLDR, then cover: the problem being solved, the proposed solution, key results, and why it matters.",
+    "critical": "Summarize this document, highlighting both its strengths and any limitations or gaps the authors acknowledge."
+}
 
 def get_document():
     """This function gets a document to summarise from either user input or command line."""
@@ -26,13 +34,17 @@ def get_document():
     else:
         filename = input("Enter filename: ")
 
-    # Open and read file
-    try:
+    # Parse extension and open accordingly
+    if filename.endswith(".pdf"):
+        doc = pymupdf.open(filename)
+        document = ""
+        for page in doc:
+            document += "\n" + page.get_text()
+    elif filename.endswith((".txt", ".md")):
         with open(filename, "r") as f:
             document = f.read()
-    except FileNotFoundError:
-        print(f"Can't find {filename}.")
-        exit(1)
+    else:
+        raise ValueError(f"Unsupported file type: {filename}")
     return document
 
 def chunk_document(document, chunk_size):
@@ -83,36 +95,47 @@ def calculate_response_cost(response, model=MODEL):
     output_cost = (response.usage.output_tokens / 1000000) * MODEL_PRICING[model]["output"]
     return input_cost, output_cost
 
-document = get_document()
+try:
+    document = get_document()
+except (FileNotFoundError, pymupdf.FileNotFoundError):
+    print(f"File not found.\nexiting...")
+    exit(1)
+except ValueError as e:
+    print(e)
+    exit(1)
+
 char_count = len(document)
 estimated_tokens = char_count / 4
 print(f"Characters: {char_count:,}")
 print(f"Estimated tokens: {estimated_tokens:,.0f}")
 chunked_document = chunk_document(document, CHUNK_SIZE)
 client = anthropic.Anthropic()
+prompt_type = "default"
 
 if len(chunked_document) == 1:
     print("Summarizing...")
-    system_prompt = "You are a document summarizer. Provide concise, accurate summaries that capture the main points."
-    response = get_claude_response(client, document, system_prompt)
+    system_prompt = PROMPTS[prompt_type]
+    temperature = 0.5
+    response = get_claude_response(client, document, system_prompt, temperature)
     input_cost, output_cost = calculate_response_cost(response)
     summary = response.content[0].text
 else:
     summaries = ""
     input_cost = 0
     output_cost = 0
-    system_prompt = "You are a document summarizer. Provide concise, accurate summaries that capture the main points."
+    map_prompt = PROMPTS[prompt_type]
+    temperature = 0.5
     for i, chunk in enumerate(chunked_document):
         print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
-        response = get_claude_response(client, chunk, system_prompt)
+        response = get_claude_response(client, chunk, map_prompt, temperature)
         summaries += "\n\n" + response.content[0].text
         chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
         input_cost += chunk_input_cost
         output_cost += chunk_output_cost
         time.sleep(60)
     print(f"Generating final summary...")
-    system_prompt = "You are a master document summarizer. You will receive one or multiple summaries for a large document. Combine all summaries into one coherent summary."
-    response = get_claude_response(client, summaries, system_prompt)
+    reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
+    response = get_claude_response(client, summaries, reduce_prompt, temperature)
     summary = response.content[0].text
     final_input_cost, final_output_cost = calculate_response_cost(response)
     input_cost += final_input_cost
