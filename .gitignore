@@ -13,3 +13,7 @@ __pycache__/
 
 # Project Specific
 \week4_document_analyzer_plan.md
+\test_doc_long.txt
+\test_doc_short.txt
+\test_doc_tiny.txt
+\test_doc.pdf
