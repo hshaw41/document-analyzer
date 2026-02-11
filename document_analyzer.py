@@ -73,20 +73,27 @@ def chunk_document(document, chunk_size):
 
 def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096):
     """This function sends a request to claude with a single user prompt and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens."""
-
-    message = client.messages.create(
-        model = model,
-        max_tokens = max_tokens,
-        messages = [
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ],
-        system = system_prompt,
-        temperature = temperature
-    )
-    return message
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            message = client.messages.create(
+                model = model,
+                max_tokens = max_tokens,
+                messages = [
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                system = system_prompt,
+                temperature = temperature
+            )
+            return message
+        except anthropic.RateLimitError as e:
+            last_error = e
+            print(f"API Rate limit error. Attempt {attempt+1}/{attempts} failed. Retrying... ")
+            time.sleep(60)
+    raise last_error
 
 def calculate_response_cost(response, model=MODEL):
     "This function calculates the input and output cost of a claude response API call."
