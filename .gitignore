@@ -17,3 +17,6 @@ __pycache__/
 \test_doc_short.txt
 \test_doc_tiny.txt
 \test_doc.pdf
+\test_doc.docx
+\test_doc.rtf
+\docs

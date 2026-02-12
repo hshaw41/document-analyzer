@@ -2,6 +2,9 @@ import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from striprtf.striprtf import rtf_to_text
 import sys
 import time
 import pymupdf
@@ -15,14 +18,13 @@ MODEL_PRICING = {
 }
 
 MODEL = "claude-haiku-4-5"
-CHUNK_SIZE = 6000
+CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
 
 PROMPTS = {
-    "default": "You are a document summarizer. Provide concise, accurate summaries that capture the main points.",
-    "simple": "Summarize this document for someone with no technical background. Avoid jargon and use simple analogies where possible.",
-    "structured": "Summarize this document. Start with a one-sentence TLDR, then cover: the problem being solved, the proposed solution, key results, and why it matters.",
-    "critical": "Summarize this document, highlighting both its strengths and any limitations or gaps the authors acknowledge."
+    "simple": "You are a science communicator who explains complex research to general audiences. Summarize this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
+    "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. Summarize this document with full technical detail, explaining why each concept, method, and result matters. The goal is for the reader to fully understand the paper's contributions, methods, and results. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
+    "expert": "You are a research scientist summarizing a paper for a knowledgeable peer. Provide a research-grade summary including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal is to give the reader a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating."
 }
 
 API_ERRORS = (anthropic.APIConnectionError, anthropic.APIError, anthropic.APITimeoutError, anthropic.RateLimitError)
@@ -42,6 +44,15 @@ def get_document():
         document = ""
         for page in doc:
             document += "\n" + page.get_text()
+    elif filename.endswith(".docx"):
+        doc = Document(filename)
+        document = ""
+        for paragraph in doc.paragraphs:
+            document += "\n" + paragraph.text
+    elif filename.endswith(".rtf"):
+        # handle rich text documents.
+        with open(filename, "r") as f:
+            document = rtf_to_text(f.read())
     elif filename.endswith((".txt", ".md")):
         with open(filename, "r") as f:
             document = f.read()
@@ -109,7 +120,7 @@ def calculate_response_cost(response, model=MODEL):
 
 try:
     document = get_document()
-except (FileNotFoundError, pymupdf.FileNotFoundError):
+except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
     print(f"File not found.\nexiting...")
     exit(1)
 except ValueError as e:
@@ -125,7 +136,7 @@ chunked_document = chunk_document(document, CHUNK_SIZE) # chunk the document if 
 
 client = anthropic.Anthropic() # connect to anthropic API
 console = Console() # instantiate console formatting tools
-prompt_type = "default"
+prompt_type = "expert"
 
 summaries = ""
 input_cost = 0
