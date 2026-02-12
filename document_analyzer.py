@@ -118,79 +118,105 @@ def calculate_response_cost(response, model=MODEL):
 
 # Main
 
-try:
-    document = get_document()
-except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
-    print(f"File not found.\nexiting...")
-    exit(1)
-except ValueError as e:
-    print(e)
-    exit(1)
-
-char_count = len(document)
-print(f"Characters: {char_count:,}")
-estimated_tokens = char_count / 4
-print(f"Estimated tokens: {estimated_tokens:,.0f}")
-
-chunked_document = chunk_document(document, CHUNK_SIZE) # chunk the document if it's large.
-
 client = anthropic.Anthropic() # connect to anthropic API
 console = Console() # instantiate console formatting tools
-prompt_type = "expert"
 
-summaries = ""
-input_cost = 0
-output_cost = 0
+while True:
+    # Main menu
+    print("Document Analyzer")
+    print("-----------------")
+    print("1. Summarise a document")
+    print("2. Open past summary")
+    print("3. Quit")
+    choice = input("Enter the number that matches your chosen option: ")
+    if choice == "1": # Summarise
+        try:
+            document = get_document()
+        except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
+            print(f"File not found.")
+            continue
+        except ValueError as e:
+            print(e)
+            continue
 
-if len(chunked_document) == 1: # if single chunk
-    print("Summarizing...")
-    system_prompt = PROMPTS[prompt_type]
-    temperature = 0.5
-    try:
-        response = get_claude_response(client, document, system_prompt, temperature)
-        input_cost, output_cost = calculate_response_cost(response)
-        summary = response.content[0].text
-    except API_ERRORS as e:
-        print(f"Failed to summarize: {e}")
-        print("There has been no API cost for this summary.")
-        exit(1)
+        char_count = len(document)
+        print(f"Characters: {char_count:,}")
+        estimated_tokens = char_count / 4
+        print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
-else:
-    map_prompt = PROMPTS[prompt_type]
-    temperature = 0.5
-    try:
-        for i, chunk in enumerate(chunked_document):
-            print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
-            response = get_claude_response(client, chunk, map_prompt, temperature)
-            summaries += "\n\n" + response.content[0].text
-            chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
-            input_cost += chunk_input_cost
-            output_cost += chunk_output_cost
-            time.sleep(60)
-    except API_ERRORS as e:
-        print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
-        if not summaries: # No summaries were generated yet?
-            print("No chunks summarised.")
-            print("There has been no API cost for this summary.")
-            exit(1)
+        chunked_document = chunk_document(document, CHUNK_SIZE) # chunk the document if it's large.
+
+        print("Select prompt type from:")
+        prompt_keys = list(PROMPTS.keys())
+        for i, prompt_type in enumerate(prompt_keys):
+            print(f"{i+1}. {prompt_type}")
+        while True:
+            prompt_type_choice = input("Choice: ")
+            if prompt_type_choice.isdigit() and 1 <= int(prompt_type_choice) <= len(prompt_keys):
+                prompt_type = prompt_keys[int(prompt_type_choice) - 1]
+                break
+            print("Invalid choice, try again.")
+
+        summaries = ""
+        input_cost = 0
+        output_cost = 0
+
+        if len(chunked_document) == 1: # if single chunk
+            print("Summarizing...")
+            system_prompt = PROMPTS[prompt_type]
+            temperature = 0.5
+            try:
+                response = get_claude_response(client, document, system_prompt, temperature)
+                input_cost, output_cost = calculate_response_cost(response)
+                summary = response.content[0].text
+            except API_ERRORS as e:
+                print(f"Failed to summarize: {e}")
+                print("There has been no API cost for this summary.")
+                continue
+
         else:
-            print(f"Attempting partial summary from {i} completed chunks.")
-    print(f"Generating final summary...")
-    reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
-    try:
-        response = get_claude_response(client, summaries, reduce_prompt, temperature)
-        summary = response.content[0].text
-        final_input_cost, final_output_cost = calculate_response_cost(response)
-        input_cost += final_input_cost
-        output_cost += final_output_cost
-    except API_ERRORS as e:
-        print("Failed to combine summaries.")
-        print("Displaying successful chunk summaries")
-        console.print(Markdown(summaries))
+            map_prompt = PROMPTS[prompt_type]
+            temperature = 0.5
+            try:
+                for i, chunk in enumerate(chunked_document):
+                    print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
+                    response = get_claude_response(client, chunk, map_prompt, temperature)
+                    summaries += "\n\n" + response.content[0].text
+                    chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
+                    input_cost += chunk_input_cost
+                    output_cost += chunk_output_cost
+                    time.sleep(60)
+            except API_ERRORS as e:
+                print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
+                if not summaries: # No summaries were generated yet?
+                    print("No chunks summarised.")
+                    print("There has been no API cost for this summary.")
+                    continue
+                else:
+                    print(f"Attempting partial summary from {i} completed chunks.")
+            print(f"Generating final summary...")
+            reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
+            try:
+                response = get_claude_response(client, summaries, reduce_prompt, temperature)
+                summary = response.content[0].text
+                final_input_cost, final_output_cost = calculate_response_cost(response)
+                input_cost += final_input_cost
+                output_cost += final_output_cost
+            except API_ERRORS as e:
+                print("Failed to combine summaries.")
+                print("Displaying successful chunk summaries")
+                console.print(Markdown(summaries))
+                total_cost = input_cost + output_cost
+                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+                continue
+
+        console.print(Markdown(summary))
         total_cost = input_cost + output_cost
         print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-        exit(1)
-
-console.print(Markdown(summary))
-total_cost = input_cost + output_cost
-print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+    elif choice == "2": # Browse
+        print("not here yet")
+    elif choice == "3": # Quit
+        print("Exiting...")
+        exit(0)
+    else: # Invalid Input
+        print("Invalid option, please enter an option in the below list")
