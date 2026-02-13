@@ -29,14 +29,8 @@ PROMPTS = {
 
 API_ERRORS = (anthropic.APIConnectionError, anthropic.APIError, anthropic.APITimeoutError, anthropic.RateLimitError)
 
-def get_document():
-    """This function gets a document to summarise from either user input or command line."""
-    
-    # Get filename from user
-    if len(sys.argv) > 1:
-        filename = sys.argv[1]
-    else:
-        filename = input("Enter filename: ")
+def get_document(filename):
+    """This function extracts all text from a document with a given filename and returns it. PDF, DOCX, RTF, Text and Markdown supported."""
 
     # Parse extension and open accordingly
     if filename.endswith(".pdf"):
@@ -121,6 +115,10 @@ def calculate_response_cost(response, model=MODEL):
 client = anthropic.Anthropic() # connect to anthropic API
 console = Console() # instantiate console formatting tools
 
+cli_filename = None
+if len(sys.argv) > 1:
+    cli_filename = sys.argv[1]
+
 while True:
     # Main menu
     print("Document Analyzer")
@@ -130,8 +128,16 @@ while True:
     print("3. Quit")
     choice = input("Enter the number that matches your chosen option: ")
     if choice == "1": # Summarise
+
+        # Get filename from user
+        if cli_filename:
+            filename = cli_filename
+            cli_filename = None # consume the filename given on the command line.
+        else:
+            filename = input("Enter filename: ")
+
         try:
-            document = get_document()
+            document = get_document(filename)
         except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
             print(f"File not found.")
             continue
