@@ -109,6 +109,63 @@ def calculate_response_cost(response, model=MODEL):
     output_cost = (response.usage.output_tokens / 1000000) * MODEL_PRICING[model]["output"]
     return input_cost, output_cost
 
+def summarize_document(client, document, prompt_type):
+    """This function takes a document and summarizes it with a chosen prompt type"""
+
+    # Chunk document
+    chunked_document = chunk_document(document, CHUNK_SIZE)
+
+    summaries = ""
+    input_cost = 0
+    output_cost = 0
+
+    if len(chunked_document) == 1: # if single chunk
+        print("Summarizing...")
+        system_prompt = PROMPTS[prompt_type]
+        temperature = 0.5
+        try:
+            response = get_claude_response(client, document, system_prompt, temperature)
+            input_cost, output_cost = calculate_response_cost(response)
+            summary = response.content[0].text
+        except API_ERRORS as e:
+            print(f"Failed to summarize: {e}")
+            print("There has been no API cost for this summary.")
+            return 
+
+    else:
+        map_prompt = PROMPTS[prompt_type]
+        temperature = 0.5
+        try:
+            for i, chunk in enumerate(chunked_document):
+                print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
+                response = get_claude_response(client, chunk, map_prompt, temperature)
+                summaries += "\n\n" + response.content[0].text
+                chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
+                input_cost += chunk_input_cost
+                output_cost += chunk_output_cost
+                time.sleep(60)
+        except API_ERRORS as e:
+            print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
+            if not summaries: # No summaries were generated yet?
+                print("No chunks summarised.")
+                print("There has been no API cost for this summary.")
+                return
+            else:
+                print(f"Attempting partial summary from {i} completed chunks.")
+        print(f"Generating final summary...")
+        reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
+        try:
+            response = get_claude_response(client, summaries, reduce_prompt, temperature)
+            summary = response.content[0].text
+            final_input_cost, final_output_cost = calculate_response_cost(response)
+            input_cost += final_input_cost
+            output_cost += final_output_cost
+        except API_ERRORS as e:
+            print("Failed to combine summaries.")
+            print("Displaying successful chunk summaries")
+            return summaries, input_cost, output_cost
+    return summary, input_cost, output_cost
+
 
 # Main
 
@@ -136,6 +193,7 @@ while True:
         else:
             filename = input("Enter filename: ")
 
+        # Extract doc text
         try:
             document = get_document(filename)
         except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
@@ -145,13 +203,13 @@ while True:
             print(e)
             continue
 
+        # Print document stats
         char_count = len(document)
         print(f"Characters: {char_count:,}")
         estimated_tokens = char_count / 4
         print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
-        chunked_document = chunk_document(document, CHUNK_SIZE) # chunk the document if it's large.
-
+        # Get prompt type from user
         print("Select prompt type from:")
         prompt_keys = list(PROMPTS.keys())
         for i, prompt_type in enumerate(prompt_keys):
@@ -163,62 +221,37 @@ while True:
                 break
             print("Invalid choice, try again.")
 
-        summaries = ""
-        input_cost = 0
-        output_cost = 0
-
-        if len(chunked_document) == 1: # if single chunk
-            print("Summarizing...")
-            system_prompt = PROMPTS[prompt_type]
-            temperature = 0.5
-            try:
-                response = get_claude_response(client, document, system_prompt, temperature)
-                input_cost, output_cost = calculate_response_cost(response)
-                summary = response.content[0].text
-            except API_ERRORS as e:
-                print(f"Failed to summarize: {e}")
-                print("There has been no API cost for this summary.")
-                continue
-
-        else:
-            map_prompt = PROMPTS[prompt_type]
-            temperature = 0.5
-            try:
-                for i, chunk in enumerate(chunked_document):
-                    print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
-                    response = get_claude_response(client, chunk, map_prompt, temperature)
-                    summaries += "\n\n" + response.content[0].text
-                    chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
-                    input_cost += chunk_input_cost
-                    output_cost += chunk_output_cost
-                    time.sleep(60)
-            except API_ERRORS as e:
-                print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
-                if not summaries: # No summaries were generated yet?
-                    print("No chunks summarised.")
-                    print("There has been no API cost for this summary.")
-                    continue
-                else:
-                    print(f"Attempting partial summary from {i} completed chunks.")
-            print(f"Generating final summary...")
-            reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
-            try:
-                response = get_claude_response(client, summaries, reduce_prompt, temperature)
-                summary = response.content[0].text
-                final_input_cost, final_output_cost = calculate_response_cost(response)
-                input_cost += final_input_cost
-                output_cost += final_output_cost
-            except API_ERRORS as e:
-                print("Failed to combine summaries.")
-                print("Displaying successful chunk summaries")
-                console.print(Markdown(summaries))
-                total_cost = input_cost + output_cost
-                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-                continue
-
-        console.print(Markdown(summary))
+        ## Main Summary Logic
+        summary_result = summarize_document(client, document, prompt_type)
+        if not summary_result:
+            continue
+        summary, input_cost, output_cost = summary_result
         total_cost = input_cost + output_cost
         print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+
+        # Post Summary Loop
+        while True:
+            print(f"Summary: {filename} ({prompt_type})")
+            print("-------------------------------------------------------------------")
+            print("1. Read full summary.")
+            print("2. Change summary type.")
+            print("3. Enter Q&A mode.")
+            print("4. Back to main menu.")
+            print("5. Quit")
+            choice = input("Enter the number that matches your chosen option: ")
+            if choice == "1": # Print Summary
+                console.print(Markdown(summary))
+            elif choice == "2": # Change summary type
+                print("not here yet")
+            elif choice == "3": # Enter Q&A mode
+                print("Not Here yet")
+            elif choice == "4": # Back to main menu
+                break
+            elif choice == "5": # Quit
+                print("Exiting...")
+                exit(0)
+            else:
+                print("Invalid option, please enter an option in the below list")
     elif choice == "2": # Browse
         print("not here yet")
     elif choice == "3": # Quit
