@@ -166,6 +166,21 @@ def summarize_document(client, document, prompt_type):
             return summaries, input_cost, output_cost
     return summary, input_cost, output_cost
 
+def get_prompt_type():
+    """This function asks the user which prompt type they would like to set for their summarisation and returns that prompt type."""
+
+    # Get prompt type from user
+    print("Select prompt type from:")
+    prompt_keys = list(PROMPTS.keys())
+    for i, prompt_type in enumerate(prompt_keys):
+        print(f"{i+1}. {prompt_type}")
+    while True:
+        prompt_type_choice = input("Choice: ")
+        if prompt_type_choice.isdigit() and 1 <= int(prompt_type_choice) <= len(prompt_keys):
+            prompt_type = prompt_keys[int(prompt_type_choice) - 1]
+            break
+        print("Invalid choice, try again.")
+    return prompt_type
 
 # Main
 
@@ -209,17 +224,7 @@ while True:
         estimated_tokens = char_count / 4
         print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
-        # Get prompt type from user
-        print("Select prompt type from:")
-        prompt_keys = list(PROMPTS.keys())
-        for i, prompt_type in enumerate(prompt_keys):
-            print(f"{i+1}. {prompt_type}")
-        while True:
-            prompt_type_choice = input("Choice: ")
-            if prompt_type_choice.isdigit() and 1 <= int(prompt_type_choice) <= len(prompt_keys):
-                prompt_type = prompt_keys[int(prompt_type_choice) - 1]
-                break
-            print("Invalid choice, try again.")
+        prompt_type = get_prompt_type() # get prompt type from the user
 
         ## Main Summary Logic
         summary_result = summarize_document(client, document, prompt_type)
@@ -242,7 +247,14 @@ while True:
             if choice == "1": # Print Summary
                 console.print(Markdown(summary))
             elif choice == "2": # Change summary type
-                print("not here yet")
+                prompt_type = get_prompt_type()
+                summary_result = summarize_document(client, document, prompt_type)
+                if not summary_result:
+                    continue
+                summary, input_cost, output_cost = summary_result
+                total_cost = input_cost + output_cost
+                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+                continue
             elif choice == "3": # Enter Q&A mode
                 print("Not Here yet")
             elif choice == "4": # Back to main menu
