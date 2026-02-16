@@ -8,6 +8,8 @@ from striprtf.striprtf import rtf_to_text
 import sys
 import time
 import pymupdf
+import os
+import json
 
 load_dotenv()
 
@@ -182,6 +184,33 @@ def get_prompt_type():
         print("Invalid choice, try again.")
     return prompt_type
 
+def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
+    """This function caches summaries to a file for later retrieval."""
+
+    document_name = os.path.splitext(os.path.basename(filename))[0]
+    filepath = f"summaries/{document_name}_summary.json"
+    os.makedirs("summaries", exist_ok=True)
+    if not os.path.exists(filepath):
+        # create it.
+        saved_summary = {
+            "filename": filename,
+            "tldr": tldr,
+            "key_terms": key_terms,
+            "summaries": {
+                prompt_type: summary
+            }
+        }
+        with open(filepath, "w") as f:
+            json.dump(saved_summary, f, indent = 2)
+        return
+    with open(filepath, "r") as f:
+        saved_summary = json.load(f)
+    if prompt_type not in saved_summary["summaries"]:
+        saved_summary["summaries"][prompt_type] = summary
+        with open(filepath, "w") as f:
+            json.dump(saved_summary, f, indent = 2)
+    return
+
 # Main
 
 client = anthropic.Anthropic() # connect to anthropic API
@@ -233,6 +262,7 @@ while True:
         summary, input_cost, output_cost = summary_result
         total_cost = input_cost + output_cost
         print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+        save_summary(filename, summary, prompt_type)
 
         # Post Summary Loop
         while True:
@@ -247,6 +277,7 @@ while True:
             if choice == "1": # Print Summary
                 console.print(Markdown(summary))
             elif choice == "2": # Change summary type
+                # OVERHAUL TO PULL FROM SAVED SUMMARIES IF THEY EXIST AND SAVE AFTER PROMPT TYPE CHANGE IF ITS NOT ALREADY BEEN SAVED
                 prompt_type = get_prompt_type()
                 summary_result = summarize_document(client, document, prompt_type)
                 if not summary_result:
@@ -254,6 +285,7 @@ while True:
                 summary, input_cost, output_cost = summary_result
                 total_cost = input_cost + output_cost
                 print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+                save_summary(filename, summary, prompt_type)
                 continue
             elif choice == "3": # Enter Q&A mode
                 print("Not Here yet")
