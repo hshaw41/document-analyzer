@@ -222,6 +222,47 @@ def load_summary(filename):
         return saved_summary
     return
 
+def post_summary_menu(client, console, filename, document, prompt_type, summary):
+    """This function displays a menu to the user that allows them to choose options after summarising a document of what they would like to do with the summary.
+    It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
+
+    while True:
+        print(f"Summary: {filename} ({prompt_type})")
+        print("-------------------------------------------------------------------")
+        print("1. Read full summary.")
+        print("2. Change summary type.")
+        print("3. Enter Q&A mode.")
+        print("4. Back to main menu.")
+        print("5. Quit")
+        choice = input("Enter the number that matches your chosen option: ")
+        if choice == "1": # Print Summary
+            console.print(Markdown(summary))
+        elif choice == "2": # Change summary type
+            prompt_type = get_prompt_type()
+            saved_summaries = load_summary(filename)
+            if saved_summaries and prompt_type in saved_summaries["summaries"]:
+                print("Cached summary loaded.")
+                summary = saved_summaries["summaries"][prompt_type]
+                continue
+            else:
+                summary_result = summarize_document(client, document, prompt_type)
+                if not summary_result:
+                    continue
+                summary, input_cost, output_cost = summary_result
+                total_cost = input_cost + output_cost
+                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+                save_summary(filename, summary, prompt_type)
+                continue
+        elif choice == "3": # Enter Q&A mode
+            print("Not Here yet")
+        elif choice == "4": # Back to main menu
+            break
+        elif choice == "5": # Quit
+            print("Exiting...")
+            exit(0)
+        else:
+            print("Invalid option, please enter an option in the below list")
+    return
 # Main
 
 client = anthropic.Anthropic() # connect to anthropic API
@@ -279,44 +320,11 @@ while True:
             print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
             save_summary(filename, summary, prompt_type)
 
-        # Post Summary Loop
-        while True:
-            print(f"Summary: {filename} ({prompt_type})")
-            print("-------------------------------------------------------------------")
-            print("1. Read full summary.")
-            print("2. Change summary type.")
-            print("3. Enter Q&A mode.")
-            print("4. Back to main menu.")
-            print("5. Quit")
-            choice = input("Enter the number that matches your chosen option: ")
-            if choice == "1": # Print Summary
-                console.print(Markdown(summary))
-            elif choice == "2": # Change summary type
-                prompt_type = get_prompt_type()
-                saved_summaries = load_summary(filename)
-                if saved_summaries and prompt_type in saved_summaries["summaries"]:
-                    print("Cached summary loaded.")
-                    summary = saved_summaries["summaries"][prompt_type]
-                    continue
-                else:
-                    summary_result = summarize_document(client, document, prompt_type)
-                    if not summary_result:
-                        continue
-                    summary, input_cost, output_cost = summary_result
-                    total_cost = input_cost + output_cost
-                    print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-                    save_summary(filename, summary, prompt_type)
-                    continue
-            elif choice == "3": # Enter Q&A mode
-                print("Not Here yet")
-            elif choice == "4": # Back to main menu
-                break
-            elif choice == "5": # Quit
-                print("Exiting...")
-                exit(0)
-            else:
-                print("Invalid option, please enter an option in the below list")
+        post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "2": # Browse
+        if not os.path.exists("summaries"):
+            print("No summaries saved")
+            continue
         filepaths = os.listdir("summaries")
         if not filepaths:
             print("No summaries saved.")
@@ -328,14 +336,15 @@ while True:
             filename = f"summaries/{filepath}"
             with open(filename, "r") as f:
                 saved_summary = json.load(f)
-            print(f"{i+1} . {saved_summary['filename']}")
+            print(f"{i+1}. {saved_summary['filename']}")
             loaded_summaries.append(saved_summary)
         print(f"{i+2}. Back to main menu")
         print(f"{i+3}. Quit")
+        back_to_main = False
         while True:
             filename_choice = input("Choice: ")
             if filename_choice.isdigit() and 1 <= int(filename_choice) <= len(loaded_summaries):
-                saved_summary = loaded_summaries[filename_choice]
+                saved_summary = loaded_summaries[int(filename_choice) - 1]
                 break
             elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 1: # back to main menu
                 back_to_main = True
@@ -347,8 +356,22 @@ while True:
                 print("Invalid choice, try again.")
         if back_to_main:
             continue
-        prompt_type = saved_summary["summaries"].keys()[0]
+        # Set state after load
+        filename = saved_summary["filename"]
+        prompt_type = list(saved_summary["summaries"].keys())[0]
         summary = saved_summary["summaries"][prompt_type]
+
+        try:
+            document = get_document(filename)
+        except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
+            print(f"File not found.")
+            continue
+        except ValueError as e:
+            print(e)
+            continue
+
+        # Call post summary loop.
+        post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "3": # Quit
         print("Exiting...")
         exit(0)
