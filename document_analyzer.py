@@ -211,6 +211,17 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
             json.dump(saved_summary, f, indent = 2)
     return
 
+def load_summary(filename):
+    """This function loads a summary from saved summaries, then returns the saved summary object."""
+
+    document_name = os.path.splitext(os.path.basename(filename))[0]
+    filepath = f"summaries/{document_name}_summary.json"
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            saved_summary = json.load(f)
+        return saved_summary
+    return
+
 # Main
 
 client = anthropic.Anthropic() # connect to anthropic API
@@ -277,16 +288,21 @@ while True:
             if choice == "1": # Print Summary
                 console.print(Markdown(summary))
             elif choice == "2": # Change summary type
-                # OVERHAUL TO PULL FROM SAVED SUMMARIES IF THEY EXIST AND SAVE AFTER PROMPT TYPE CHANGE IF ITS NOT ALREADY BEEN SAVED
                 prompt_type = get_prompt_type()
-                summary_result = summarize_document(client, document, prompt_type)
-                if not summary_result:
+                saved_summaries = load_summary(filename)
+                if saved_summaries and prompt_type in saved_summaries["summaries"]:
+                    print("Cached summary loaded.")
+                    summary = saved_summaries["summaries"][prompt_type]
                     continue
-                summary, input_cost, output_cost = summary_result
-                total_cost = input_cost + output_cost
-                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-                save_summary(filename, summary, prompt_type)
-                continue
+                else:
+                    summary_result = summarize_document(client, document, prompt_type)
+                    if not summary_result:
+                        continue
+                    summary, input_cost, output_cost = summary_result
+                    total_cost = input_cost + output_cost
+                    print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+                    save_summary(filename, summary, prompt_type)
+                    continue
             elif choice == "3": # Enter Q&A mode
                 print("Not Here yet")
             elif choice == "4": # Back to main menu
