@@ -187,7 +187,7 @@ def get_prompt_type():
 def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
     """This function caches summaries to a file for later retrieval."""
 
-    document_name = os.path.splitext(os.path.basename(filename))[0]
+    document_name = os.path.basename(filename).replace(".", "_")
     filepath = f"summaries/{document_name}_summary.json"
     os.makedirs("summaries", exist_ok=True)
     if not os.path.exists(filepath):
@@ -214,7 +214,7 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
 def load_summary(filename):
     """This function loads a summary from saved summaries, then returns the saved summary object."""
 
-    document_name = os.path.splitext(os.path.basename(filename))[0]
+    document_name = os.path.basename(filename).replace(".", "_")
     filepath = f"summaries/{document_name}_summary.json"
     if os.path.exists(filepath):
         with open(filepath, "r") as f:
@@ -266,14 +266,18 @@ while True:
 
         prompt_type = get_prompt_type() # get prompt type from the user
 
-        ## Main Summary Logic
-        summary_result = summarize_document(client, document, prompt_type)
-        if not summary_result:
-            continue
-        summary, input_cost, output_cost = summary_result
-        total_cost = input_cost + output_cost
-        print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-        save_summary(filename, summary, prompt_type)
+        saved_summaries = load_summary(filename)
+        if saved_summaries and prompt_type in saved_summaries["summaries"]:
+            print("Cached summary loaded.")
+            summary = saved_summaries["summaries"][prompt_type]
+        else:
+            summary_result = summarize_document(client, document, prompt_type)
+            if not summary_result:
+                continue
+            summary, input_cost, output_cost = summary_result
+            total_cost = input_cost + output_cost
+            print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+            save_summary(filename, summary, prompt_type)
 
         # Post Summary Loop
         while True:
@@ -313,7 +317,38 @@ while True:
             else:
                 print("Invalid option, please enter an option in the below list")
     elif choice == "2": # Browse
-        print("not here yet")
+        filepaths = os.listdir("summaries")
+        if not filepaths:
+            print("No summaries saved.")
+            continue
+        print("Saved Summaries")
+        print("---------------")
+        loaded_summaries = []
+        for i, filepath in enumerate(filepaths):
+            filename = f"summaries/{filepath}"
+            with open(filename, "r") as f:
+                saved_summary = json.load(f)
+            print(f"{i+1} . {saved_summary['filename']}")
+            loaded_summaries.append(saved_summary)
+        print(f"{i+2}. Back to main menu")
+        print(f"{i+3}. Quit")
+        while True:
+            filename_choice = input("Choice: ")
+            if filename_choice.isdigit() and 1 <= int(filename_choice) <= len(loaded_summaries):
+                saved_summary = loaded_summaries[filename_choice]
+                break
+            elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 1: # back to main menu
+                back_to_main = True
+                break
+            elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 2: # quit app
+                print("Exiting...")
+                exit(0)
+            else:
+                print("Invalid choice, try again.")
+        if back_to_main:
+            continue
+        prompt_type = saved_summary["summaries"].keys()[0]
+        summary = saved_summary["summaries"][prompt_type]
     elif choice == "3": # Quit
         print("Exiting...")
         exit(0)
