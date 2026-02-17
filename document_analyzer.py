@@ -24,12 +24,31 @@ CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
 
 PROMPTS = {
-    "simple": "You are a science communicator who explains complex research to general audiences. Summarize this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
-    "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. Summarize this document with full technical detail, explaining why each concept, method, and result matters. The goal is for the reader to fully understand the paper's contributions, methods, and results. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
+    "simple": "You are a science communicator who explains complex research to general audiences. summarise this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
+    "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. summarise this document with full technical detail, explaining why each concept, method, and result matters. The goal is for the reader to fully understand the paper's contributions, methods, and results. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
     "expert": "You are a research scientist summarizing a paper for a knowledgeable peer. Provide a research-grade summary including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal is to give the reader a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating."
 }
 
+REDUCE_INSTRUCTIONS = " You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
+SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS = "In the tldr field place a one sentence overview of the document. In the key_terms field, list the technical terms and concepts of the document. Place the full summary in the summary field."
+
 API_ERRORS = (anthropic.APIConnectionError, anthropic.APIError, anthropic.APITimeoutError, anthropic.RateLimitError)
+
+SUMMARY_OUTPUT_CONFIG = {
+    "format": {
+        "type": "json_schema",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "tldr": {"type": "string"},
+                "key_terms": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"}
+            },
+            "required": ["tldr", "key_terms", "summary"],
+            "additionalProperties": False
+        }
+    }
+}
 
 def get_document(filename):
     """This function extracts all text from a document with a given filename and returns it. PDF, DOCX, RTF, Text and Markdown supported."""
@@ -80,7 +99,7 @@ def chunk_document(document, chunk_size):
         chunked_document.append(chunk) # add chunk to list
     return chunked_document
 
-def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096):
+def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
     """This function sends a request to claude with a single user prompt and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens."""
     attempts = 3
     for attempt in range(attempts):
@@ -95,7 +114,8 @@ def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, mod
                     }
                 ],
                 system = system_prompt,
-                temperature = temperature
+                temperature = temperature,
+                output_config = output_config
             )
             return message
         except anthropic.RateLimitError as e:
@@ -111,8 +131,8 @@ def calculate_response_cost(response, model=MODEL):
     output_cost = (response.usage.output_tokens / 1000000) * MODEL_PRICING[model]["output"]
     return input_cost, output_cost
 
-def summarize_document(client, document, prompt_type):
-    """This function takes a document and summarizes it with a chosen prompt type"""
+def summarise_document(client, document, prompt_type):
+    """This function takes a document and summarises it with a chosen prompt type"""
 
     # Chunk document
     chunked_document = chunk_document(document, CHUNK_SIZE)
@@ -123,14 +143,17 @@ def summarize_document(client, document, prompt_type):
 
     if len(chunked_document) == 1: # if single chunk
         print("Summarizing...")
-        system_prompt = PROMPTS[prompt_type]
+        system_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
         temperature = 0.5
         try:
-            response = get_claude_response(client, document, system_prompt, temperature)
+            response = get_claude_response(client, document, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             input_cost, output_cost = calculate_response_cost(response)
-            summary = response.content[0].text
+            result = json.loads(response.content[0].text)
+            summary = result["summary"]
+            tldr = result["tldr"]
+            key_terms = result["key_terms"]
         except API_ERRORS as e:
-            print(f"Failed to summarize: {e}")
+            print(f"Failed to summarise: {e}")
             print("There has been no API cost for this summary.")
             return 
 
@@ -155,18 +178,23 @@ def summarize_document(client, document, prompt_type):
             else:
                 print(f"Attempting partial summary from {i} completed chunks.")
         print(f"Generating final summary...")
-        reduce_prompt = f"{PROMPTS[prompt_type]} You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
+        reduce_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         try:
-            response = get_claude_response(client, summaries, reduce_prompt, temperature)
-            summary = response.content[0].text
+            response = get_claude_response(client, summaries, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             final_input_cost, final_output_cost = calculate_response_cost(response)
             input_cost += final_input_cost
             output_cost += final_output_cost
+            result = json.loads(response.content[0].text)
+            summary = result["summary"]
+            tldr = result["tldr"]
+            key_terms = result["key_terms"]
         except API_ERRORS as e:
             print("Failed to combine summaries.")
             print("Displaying successful chunk summaries")
-            return summaries, input_cost, output_cost
-    return summary, input_cost, output_cost
+            tldr=None
+            key_terms=None
+            return summaries, tldr, key_terms, input_cost, output_cost
+    return summary, tldr, key_terms, input_cost, output_cost
 
 def get_prompt_type():
     """This function asks the user which prompt type they would like to set for their summarisation and returns that prompt type."""
@@ -245,10 +273,10 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
                 summary = saved_summaries["summaries"][prompt_type]
                 continue
             else:
-                summary_result = summarize_document(client, document, prompt_type)
+                summary_result = summarise_document(client, document, prompt_type)
                 if not summary_result:
                     continue
-                summary, input_cost, output_cost = summary_result
+                summary, tldr, key_terms, input_cost, output_cost = summary_result
                 total_cost = input_cost + output_cost
                 print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
                 save_summary(filename, summary, prompt_type)
@@ -312,12 +340,20 @@ while True:
             print("Cached summary loaded.")
             summary = saved_summaries["summaries"][prompt_type]
         else:
-            summary_result = summarize_document(client, document, prompt_type)
+            summary_result = summarise_document(client, document, prompt_type)
             if not summary_result:
                 continue
-            summary, input_cost, output_cost = summary_result
+            summary, tldr, key_terms, input_cost, output_cost = summary_result
             total_cost = input_cost + output_cost
-            print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+            print(f"TLDR: {tldr}\n")
+            print(f"Key Terms: ")
+            for term in key_terms:
+                if term != key_terms[-1]:
+                    print(f"{term}, ", end = "")
+                else:
+                    print(term, end = "")
+            print("\n")
+            print(f"Cost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}\n")
             save_summary(filename, summary, prompt_type)
 
         post_summary_menu(client, console, filename, document, prompt_type, summary)
