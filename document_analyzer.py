@@ -100,23 +100,25 @@ def chunk_document(document, chunk_size):
     return chunked_document
 
 def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
-    """This function sends a request to claude with a single user prompt and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens."""
+    """This function sends a request to claude with a single user prompt and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        "system": system_prompt,
+        "temperature": temperature,
+    }
+    if output_config:
+        kwargs["output_config"] = output_config
     attempts = 3
     for attempt in range(attempts):
         try:
-            message = client.messages.create(
-                model = model,
-                max_tokens = max_tokens,
-                messages = [
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                system = system_prompt,
-                temperature = temperature,
-                output_config = output_config
-            )
+            message = client.messages.create(**kwargs)
             return message
         except anthropic.RateLimitError as e:
             last_error = e
@@ -222,12 +224,14 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
         # create it.
         saved_summary = {
             "filename": filename,
-            "tldr": tldr,
-            "key_terms": key_terms,
             "summaries": {
                 prompt_type: summary
             }
         }
+        if tldr:
+            saved_summary["tldr"] = tldr
+        if key_terms:
+            saved_summary["key_terms"] = key_terms
         with open(filepath, "w") as f:
             json.dump(saved_summary, f, indent = 2)
         return
@@ -346,13 +350,7 @@ while True:
             summary, tldr, key_terms, input_cost, output_cost = summary_result
             total_cost = input_cost + output_cost
             print(f"TLDR: {tldr}\n")
-            print(f"Key Terms: ")
-            for term in key_terms:
-                if term != key_terms[-1]:
-                    print(f"{term}, ", end = "")
-                else:
-                    print(term, end = "")
-            print("\n")
+            print(f"Key Terms: {', '.join(key_terms)}\n")
             print(f"Cost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}\n")
             save_summary(filename, summary, prompt_type)
 
