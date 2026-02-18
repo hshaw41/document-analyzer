@@ -220,7 +220,7 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
     document_name = os.path.basename(filename).replace(".", "_")
     filepath = f"summaries/{document_name}_summary.json"
     os.makedirs("summaries", exist_ok=True)
-    if not os.path.exists(filepath):
+    if not os.path.exists(filepath): # Writing a new save file
         # create it.
         saved_summary = {
             "filename": filename,
@@ -234,13 +234,24 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
             saved_summary["key_terms"] = key_terms
         with open(filepath, "w") as f:
             json.dump(saved_summary, f, indent = 2)
-        return
-    with open(filepath, "r") as f:
-        saved_summary = json.load(f)
-    if prompt_type not in saved_summary["summaries"]:
-        saved_summary["summaries"][prompt_type] = summary
-        with open(filepath, "w") as f:
-            json.dump(saved_summary, f, indent = 2)
+    else: # Updating existing save file
+        with open(filepath, "r") as f:
+            saved_summary = json.load(f)
+
+        file_changed = False
+        if prompt_type not in saved_summary["summaries"]:
+            saved_summary["summaries"][prompt_type] = summary
+            file_changed = True
+        if tldr and "tldr" not in saved_summary:
+            saved_summary["tldr"] = tldr
+            file_changed = True
+        if key_terms and "key_terms" not in saved_summary:
+            saved_summary["key_terms"] = key_terms
+            file_changed = True
+
+        if file_changed:
+            with open(filepath, "w") as f:
+                json.dump(saved_summary, f, indent = 2)
     return
 
 def load_summary(filename):
@@ -271,10 +282,16 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
             console.print(Markdown(summary))
         elif choice == "2": # Change summary type
             prompt_type = get_prompt_type()
-            saved_summaries = load_summary(filename)
-            if saved_summaries and prompt_type in saved_summaries["summaries"]:
+            saved_summary = load_summary(filename)
+            if saved_summary and prompt_type in saved_summary["summaries"]:
                 print("Cached summary loaded.")
-                summary = saved_summaries["summaries"][prompt_type]
+                summary = saved_summary["summaries"][prompt_type]
+                tldr = saved_summary.get("tldr")
+                key_terms = saved_summary.get("key_terms")
+                if tldr:
+                    print(f"TLDR: {tldr}\n")
+                if key_terms:
+                    print(f"Key Terms: {', '.join(key_terms)}\n")
                 continue
             else:
                 summary_result = summarise_document(client, document, prompt_type)
@@ -282,8 +299,12 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
                     continue
                 summary, tldr, key_terms, input_cost, output_cost = summary_result
                 total_cost = input_cost + output_cost
+                if tldr:
+                    print(f"TLDR: {tldr}\n")
+                if key_terms:
+                    print(f"Key Terms: {', '.join(key_terms)}\n")
                 print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-                save_summary(filename, summary, prompt_type)
+                save_summary(filename, summary, prompt_type, tldr, key_terms)
                 continue
         elif choice == "3": # Enter Q&A mode
             print("Not Here yet")
@@ -339,20 +360,28 @@ while True:
 
         prompt_type = get_prompt_type() # get prompt type from the user
 
-        saved_summaries = load_summary(filename)
-        if saved_summaries and prompt_type in saved_summaries["summaries"]:
+        saved_summary = load_summary(filename)
+        if saved_summary and prompt_type in saved_summary["summaries"]:
             print("Cached summary loaded.")
-            summary = saved_summaries["summaries"][prompt_type]
+            summary = saved_summary["summaries"][prompt_type]
+            tldr = saved_summary.get("tldr")
+            key_terms = saved_summary.get("key_terms")
+            if tldr:
+                print(f"TLDR: {tldr}\n")
+            if key_terms:
+                print(f"Key Terms: {', '.join(key_terms)}\n")
         else:
             summary_result = summarise_document(client, document, prompt_type)
             if not summary_result:
                 continue
             summary, tldr, key_terms, input_cost, output_cost = summary_result
             total_cost = input_cost + output_cost
-            print(f"TLDR: {tldr}\n")
-            print(f"Key Terms: {', '.join(key_terms)}\n")
+            if tldr:
+                print(f"TLDR: {tldr}\n")
+            if key_terms:
+                print(f"Key Terms: {', '.join(key_terms)}\n")
             print(f"Cost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}\n")
-            save_summary(filename, summary, prompt_type)
+            save_summary(filename, summary, prompt_type, tldr, key_terms)
 
         post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "2": # Browse
@@ -394,6 +423,13 @@ while True:
         filename = saved_summary["filename"]
         prompt_type = list(saved_summary["summaries"].keys())[0]
         summary = saved_summary["summaries"][prompt_type]
+        tldr = saved_summary.get("tldr")
+        key_terms = saved_summary.get("key_terms")
+
+        if tldr:
+            print(f"TLDR: {tldr}\n")
+        if key_terms:
+            print(f"Key Terms: {', '.join(key_terms)}\n")
 
         try:
             document = get_document(filename)
