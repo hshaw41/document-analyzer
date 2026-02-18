@@ -144,7 +144,7 @@ def summarise_document(client, document, prompt_type):
     output_cost = 0
 
     if len(chunked_document) == 1: # if single chunk
-        print("Summarizing...")
+        print("\nSummarizing...")
         system_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
         temperature = 0.5
         try:
@@ -162,6 +162,7 @@ def summarise_document(client, document, prompt_type):
     else:
         map_prompt = PROMPTS[prompt_type]
         temperature = 0.5
+        print()
         try:
             for i, chunk in enumerate(chunked_document):
                 print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
@@ -179,7 +180,7 @@ def summarise_document(client, document, prompt_type):
                 return
             else:
                 print(f"Attempting partial summary from {i} completed chunks.")
-        print(f"Generating final summary...")
+        print(f"\nGenerating final summary...")
         reduce_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         try:
             response = get_claude_response(client, summaries, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
@@ -202,7 +203,7 @@ def get_prompt_type():
     """This function asks the user which prompt type they would like to set for their summarisation and returns that prompt type."""
 
     # Get prompt type from user
-    print("Select prompt type from:")
+    print("\nSelect prompt type from:")
     prompt_keys = list(PROMPTS.keys())
     for i, prompt_type in enumerate(prompt_keys):
         print(f"{i+1}. {prompt_type}")
@@ -270,7 +271,7 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
     It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
 
     while True:
-        print(f"Summary: {filename} ({prompt_type})")
+        print(f"\nSummary: {filename} ({prompt_type})")
         print("-------------------------------------------------------------------")
         print("1. Read full summary.")
         print("2. Change summary type.")
@@ -279,19 +280,22 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
         print("5. Quit")
         choice = input("Enter the number that matches your chosen option: ")
         if choice == "1": # Print Summary
+            print()
             console.print(Markdown(summary))
+            input("\nPress Enter to continue...")
         elif choice == "2": # Change summary type
             prompt_type = get_prompt_type()
             saved_summary = load_summary(filename)
             if saved_summary and prompt_type in saved_summary["summaries"]:
-                print("Cached summary loaded.")
+                print("\nCached summary loaded.")
                 summary = saved_summary["summaries"][prompt_type]
                 tldr = saved_summary.get("tldr")
                 key_terms = saved_summary.get("key_terms")
                 if tldr:
-                    print(f"TLDR: {tldr}\n")
+                    print(f"\nTLDR: {tldr}")
                 if key_terms:
-                    print(f"Key Terms: {', '.join(key_terms)}\n")
+                    print(f"\nKey Terms: {', '.join(key_terms)}")
+                input("\nPress Enter to continue...")
                 continue
             else:
                 summary_result = summarise_document(client, document, prompt_type)
@@ -300,18 +304,19 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
                 summary, tldr, key_terms, input_cost, output_cost = summary_result
                 total_cost = input_cost + output_cost
                 if tldr:
-                    print(f"TLDR: {tldr}\n")
+                    print(f"\nTLDR: {tldr}")
                 if key_terms:
-                    print(f"Key Terms: {', '.join(key_terms)}\n")
+                    print(f"\nKey Terms: {', '.join(key_terms)}")
                 print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
                 save_summary(filename, summary, prompt_type, tldr, key_terms)
+                input("\nPress Enter to continue...")
                 continue
         elif choice == "3": # Enter Q&A mode
-            print("Not Here yet")
+            print("\nNot Here yet")
         elif choice == "4": # Back to main menu
             break
         elif choice == "5": # Quit
-            print("Exiting...")
+            print("\nExiting...")
             exit(0)
         else:
             print("Invalid option, please enter an option in the below list")
@@ -327,7 +332,7 @@ if len(sys.argv) > 1:
 
 while True:
     # Main menu
-    print("Document Analyzer")
+    print("\nDocument Analyzer")
     print("-----------------")
     print("1. Summarise a document")
     print("2. Open past summary")
@@ -340,7 +345,7 @@ while True:
             filename = cli_filename
             cli_filename = None # consume the filename given on the command line.
         else:
-            filename = input("Enter filename: ")
+            filename = input("\nEnter filename: ")
 
         # Extract doc text
         try:
@@ -354,7 +359,7 @@ while True:
 
         # Print document stats
         char_count = len(document)
-        print(f"Characters: {char_count:,}")
+        print(f"\nCharacters: {char_count:,}")
         estimated_tokens = char_count / 4
         print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
@@ -362,14 +367,15 @@ while True:
 
         saved_summary = load_summary(filename)
         if saved_summary and prompt_type in saved_summary["summaries"]:
-            print("Cached summary loaded.")
+            print("\nCached summary loaded.")
             summary = saved_summary["summaries"][prompt_type]
             tldr = saved_summary.get("tldr")
             key_terms = saved_summary.get("key_terms")
             if tldr:
-                print(f"TLDR: {tldr}\n")
+                print(f"\nTLDR: {tldr}")
             if key_terms:
-                print(f"Key Terms: {', '.join(key_terms)}\n")
+                print(f"\nKey Terms: {', '.join(key_terms)}")
+            input("\nPress Enter to continue...")
         else:
             summary_result = summarise_document(client, document, prompt_type)
             if not summary_result:
@@ -377,22 +383,23 @@ while True:
             summary, tldr, key_terms, input_cost, output_cost = summary_result
             total_cost = input_cost + output_cost
             if tldr:
-                print(f"TLDR: {tldr}\n")
+                print(f"\nTLDR: {tldr}")
             if key_terms:
-                print(f"Key Terms: {', '.join(key_terms)}\n")
-            print(f"Cost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}\n")
+                print(f"\nKey Terms: {', '.join(key_terms)}")
+            print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
             save_summary(filename, summary, prompt_type, tldr, key_terms)
+            input("\nPress Enter to continue...")
 
         post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "2": # Browse
         if not os.path.exists("summaries"):
-            print("No summaries saved")
+            print("\nNo summaries saved")
             continue
         filepaths = os.listdir("summaries")
         if not filepaths:
-            print("No summaries saved.")
+            print("\nNo summaries saved.")
             continue
-        print("Saved Summaries")
+        print("\nSaved Summaries")
         print("---------------")
         loaded_summaries = []
         for i, filepath in enumerate(filepaths):
@@ -413,7 +420,7 @@ while True:
                 back_to_main = True
                 break
             elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 2: # quit app
-                print("Exiting...")
+                print("\nExiting...")
                 exit(0)
             else:
                 print("Invalid choice, try again.")
@@ -427,9 +434,10 @@ while True:
         key_terms = saved_summary.get("key_terms")
 
         if tldr:
-            print(f"TLDR: {tldr}\n")
+            print(f"\nTLDR: {tldr}")
         if key_terms:
-            print(f"Key Terms: {', '.join(key_terms)}\n")
+            print(f"\nKey Terms: {', '.join(key_terms)}")
+        input("\nPress Enter to continue...")
 
         try:
             document = get_document(filename)
@@ -443,7 +451,7 @@ while True:
         # Call post summary loop.
         post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "3": # Quit
-        print("Exiting...")
+        print("\nExiting...")
         exit(0)
     else: # Invalid Input
         print("Invalid option, please enter an option in the below list")
