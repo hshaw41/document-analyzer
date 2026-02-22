@@ -23,10 +23,16 @@ MODEL = "claude-haiku-4-5"
 CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
 
-PROMPTS = {
+SUMMARY_PROMPTS = {
     "simple": "You are a science communicator who explains complex research to general audiences. summarise this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
     "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. summarise this document with full technical detail, explaining why each concept, method, and result matters. The goal is for the reader to fully understand the paper's contributions, methods, and results. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
     "expert": "You are a research scientist summarizing a paper for a knowledgeable peer. Provide a research-grade summary including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal is to give the reader a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating."
+}
+
+QANDA_PROMPTS = {
+    "simple": "You are a science communicator who explains complex research to general audiences. From a document summary answer questions about the summary using no jargon, simple analogies, and plain language. The goal of this discussion is to gain an understanding of what the document covers and why it matters in less than a 10 minute conversation. Base your answers strictly on the content of the summary. If something is unclear or not covered by the summary, say so rather than speculating.",
+    "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. From a document summary answer questions about that summary with full technical detail, explaining why each concept, method and result matters. The goal of this conversation is for the user to fully understand the paper's contributions, methods and results. Base your answers strictly on the content of the provided summary of a research paper. If something is unclear or not covered by the summary, say so rather than speculating.",
+    "expert": "You are a research scientist discussing a paper with a knowledgeable peer. Provide research-grade answers to the user's questions including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal of this conversation is to give the user a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your answers strictly on the content of the provided summary of a research paper. If something is unclear or not covered by the summary, say so rather than speculating."
 }
 
 REDUCE_INSTRUCTIONS = " You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
@@ -99,17 +105,12 @@ def chunk_document(document, chunk_size):
         chunked_document.append(chunk) # add chunk to list
     return chunked_document
 
-def get_claude_response(client, user_prompt, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
-    """This function sends a request to claude with a single user prompt and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
+def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
+    """This function sends a request to claude with a list of messages and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
     kwargs = {
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ],
+        "messages": messages,
         "system": system_prompt,
         "temperature": temperature,
     }
@@ -145,10 +146,16 @@ def summarise_document(client, document, prompt_type):
 
     if len(chunked_document) == 1: # if single chunk
         print("\nSummarizing...")
-        system_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
+        system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
         temperature = 0.5
+        messages = [
+            {
+                "role": "user",
+                "content": document
+            }
+        ]
         try:
-            response = get_claude_response(client, document, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+            response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             input_cost, output_cost = calculate_response_cost(response)
             result = json.loads(response.content[0].text)
             summary = result["summary"]
@@ -160,13 +167,19 @@ def summarise_document(client, document, prompt_type):
             return 
 
     else:
-        map_prompt = PROMPTS[prompt_type]
+        map_prompt = SUMMARY_PROMPTS[prompt_type]
         temperature = 0.5
         print()
         try:
             for i, chunk in enumerate(chunked_document):
                 print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
-                response = get_claude_response(client, chunk, map_prompt, temperature)
+                messages = [
+                    {
+                        "role": "user",
+                        "content": chunk
+                    }
+                ]
+                response = get_claude_response(client, messages, map_prompt, temperature)
                 summaries += "\n\n" + response.content[0].text
                 chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
                 input_cost += chunk_input_cost
@@ -181,9 +194,15 @@ def summarise_document(client, document, prompt_type):
             else:
                 print(f"Attempting partial summary from {i} completed chunks.")
         print(f"\nGenerating final summary...")
-        reduce_prompt = PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
+        reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
+        messages = [
+            {
+                "role": "user",
+                "content": summaries
+            }
+        ]
         try:
-            response = get_claude_response(client, summaries, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+            response = get_claude_response(client, messages, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             final_input_cost, final_output_cost = calculate_response_cost(response)
             input_cost += final_input_cost
             output_cost += final_output_cost
@@ -204,7 +223,7 @@ def get_prompt_type():
 
     # Get prompt type from user
     print("\nSelect prompt type from:")
-    prompt_keys = list(PROMPTS.keys())
+    prompt_keys = list(SUMMARY_PROMPTS.keys())
     for i, prompt_type in enumerate(prompt_keys):
         print(f"{i+1}. {prompt_type}")
     while True:
