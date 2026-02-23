@@ -87,7 +87,7 @@ def chunk_document(document, chunk_size):
     chunked_document = []
     current_position = 0
     while current_position < len(document): # chunk until the end of document
-        split_point = current_position + (chunk_size * CHARS_PER_TOKEN) # calulcate approximate split
+        split_point = current_position + (chunk_size * CHARS_PER_TOKEN) # calculate approximate split
 
         if split_point < len(document): 
             clean_split_point = document.rfind("\n\n", current_position, split_point) 
@@ -104,6 +104,18 @@ def chunk_document(document, chunk_size):
             current_position = len(document)
         chunked_document.append(chunk) # add chunk to list
     return chunked_document
+
+def display_summary_info(tldr, key_terms, input_cost=None, output_cost=None):
+    """This function displays document summary information. It takes individual info items and displays them if the info is available."""
+
+    if tldr:
+        print(f"\nTLDR: {tldr}")
+    if key_terms:
+        print(f"\nKey Terms: {', '.join(key_terms)}")
+    if input_cost and output_cost:
+        total_cost = input_cost + output_cost
+        print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+    return
 
 def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
     """This function sends a request to claude with a list of messages and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
@@ -285,6 +297,25 @@ def load_summary(filename):
         return saved_summary
     return
 
+def get_or_generate_summary(client, filename, document, prompt_type):
+    """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
+
+    saved_summary = load_summary(filename)
+    if saved_summary and prompt_type in saved_summary["summaries"]:
+        print("\nCached summary loaded.")
+        summary = saved_summary["summaries"][prompt_type]
+        tldr = saved_summary.get("tldr")
+        key_terms = saved_summary.get("key_terms")
+        display_summary_info(tldr, key_terms)
+    else:
+        summary_result = summarise_document(client, document, prompt_type)
+        if not summary_result:
+            return
+        summary, tldr, key_terms, input_cost, output_cost = summary_result
+        display_summary_info(tldr, key_terms, input_cost, output_cost)
+        save_summary(filename, summary, prompt_type, tldr, key_terms)
+    return summary
+
 def post_summary_menu(client, console, filename, document, prompt_type, summary):
     """This function displays a menu to the user that allows them to choose options after summarising a document of what they would like to do with the summary.
     It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
@@ -304,56 +335,36 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
             input("\nPress Enter to continue...")
         elif choice == "2": # Change summary type
             prompt_type = get_prompt_type()
-            saved_summary = load_summary(filename)
-            if saved_summary and prompt_type in saved_summary["summaries"]:
-                print("\nCached summary loaded.")
-                summary = saved_summary["summaries"][prompt_type]
-                tldr = saved_summary.get("tldr")
-                key_terms = saved_summary.get("key_terms")
-                if tldr:
-                    print(f"\nTLDR: {tldr}")
-                if key_terms:
-                    print(f"\nKey Terms: {', '.join(key_terms)}")
-                input("\nPress Enter to continue...")
-                continue
-            else:
-                summary_result = summarise_document(client, document, prompt_type)
-                if not summary_result:
-                    continue
-                summary, tldr, key_terms, input_cost, output_cost = summary_result
-                total_cost = input_cost + output_cost
-                if tldr:
-                    print(f"\nTLDR: {tldr}")
-                if key_terms:
-                    print(f"\nKey Terms: {', '.join(key_terms)}")
-                print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-                save_summary(filename, summary, prompt_type, tldr, key_terms)
-                input("\nPress Enter to continue...")
-                continue
+            result = get_or_generate_summary(client, filename, document, prompt_type)
+            if result:
+                summary = result
+            input("\nPress Enter to continue...")
         elif choice == "3": # Enter Q&A mode
             system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
-            print(f"\nQ&A Mode: {filename} ({prompt_type}) - type quit to return to menu.")
+            print(f"\nQ&A Mode: {filename} ({prompt_type})")
             print("-------------------------------------------------------------------")
-            print("type 'exit' to return to menu")
+            print("type 'quit' to return to menu")
             messages = []
             while True:
                 user_message = input("\n>> ")
                 if user_message.lower().strip() == "quit":
                     print("Returning to post summary menu")
                     break
-                else:
-                    current_user_message = {"role": "user", "content": user_message}
-                    messages.append(current_user_message)
-                    try:
-                        response = get_claude_response(client, messages, system_prompt)
-                        print()
-                        console.print(Markdown(response.content[0].text))
-                        current_assistant_message = {"role": "assistant", "content": response.content[0].text}
-                        messages.append(current_assistant_message)
-                    except API_ERRORS as e:
-                        print(f"\nFailed to get response from assistant. {e}")
-                        print("There has been no API cost for this question. Please try again.")
-                        messages.pop()
+                if not user_message.strip():
+                    print("Please enter a question.")
+                    continue
+                current_user_message = {"role": "user", "content": user_message}
+                messages.append(current_user_message)
+                try:
+                    response = get_claude_response(client, messages, system_prompt)
+                    print()
+                    console.print(Markdown(response.content[0].text))
+                    current_assistant_message = {"role": "assistant", "content": response.content[0].text}
+                    messages.append(current_assistant_message)
+                except API_ERRORS as e:
+                    print(f"\nFailed to get response from assistant. {e}")
+                    print("There has been no API cost for this question. Please try again.")
+                    messages.pop()
         elif choice == "4": # Back to main menu
             break
         elif choice == "5": # Quit
@@ -405,31 +416,10 @@ while True:
         print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
         prompt_type = get_prompt_type() # get prompt type from the user
-
-        saved_summary = load_summary(filename)
-        if saved_summary and prompt_type in saved_summary["summaries"]:
-            print("\nCached summary loaded.")
-            summary = saved_summary["summaries"][prompt_type]
-            tldr = saved_summary.get("tldr")
-            key_terms = saved_summary.get("key_terms")
-            if tldr:
-                print(f"\nTLDR: {tldr}")
-            if key_terms:
-                print(f"\nKey Terms: {', '.join(key_terms)}")
-            input("\nPress Enter to continue...")
-        else:
-            summary_result = summarise_document(client, document, prompt_type)
-            if not summary_result:
-                continue
-            summary, tldr, key_terms, input_cost, output_cost = summary_result
-            total_cost = input_cost + output_cost
-            if tldr:
-                print(f"\nTLDR: {tldr}")
-            if key_terms:
-                print(f"\nKey Terms: {', '.join(key_terms)}")
-            print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
-            save_summary(filename, summary, prompt_type, tldr, key_terms)
-            input("\nPress Enter to continue...")
+        summary = get_or_generate_summary(client, filename, document, prompt_type)
+        if not summary:
+            continue
+        input("\nPress Enter to continue...")
 
         post_summary_menu(client, console, filename, document, prompt_type, summary)
     elif choice == "2": # Browse
@@ -473,11 +463,7 @@ while True:
         summary = saved_summary["summaries"][prompt_type]
         tldr = saved_summary.get("tldr")
         key_terms = saved_summary.get("key_terms")
-
-        if tldr:
-            print(f"\nTLDR: {tldr}")
-        if key_terms:
-            print(f"\nKey Terms: {', '.join(key_terms)}")
+        display_summary_info(tldr, key_terms)
         input("\nPress Enter to continue...")
 
         try:
