@@ -340,31 +340,7 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
                 summary = result
             input("\nPress Enter to continue...")
         elif choice == "3": # Enter Q&A mode
-            system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
-            print(f"\nQ&A Mode: {filename} ({prompt_type})")
-            print("-------------------------------------------------------------------")
-            print("type 'quit' to return to menu")
-            messages = []
-            while True:
-                user_message = input("\n>> ")
-                if user_message.lower().strip() == "quit":
-                    print("Returning to post summary menu")
-                    break
-                if not user_message.strip():
-                    print("Please enter a question.")
-                    continue
-                current_user_message = {"role": "user", "content": user_message}
-                messages.append(current_user_message)
-                try:
-                    response = get_claude_response(client, messages, system_prompt)
-                    print()
-                    console.print(Markdown(response.content[0].text))
-                    current_assistant_message = {"role": "assistant", "content": response.content[0].text}
-                    messages.append(current_assistant_message)
-                except API_ERRORS as e:
-                    print(f"\nFailed to get response from assistant. {e}")
-                    print("There has been no API cost for this question. Please try again.")
-                    messages.pop()
+            qa_mode(client, console, filename, summary, prompt_type)
         elif choice == "4": # Back to main menu
             break
         elif choice == "5": # Quit
@@ -373,6 +349,130 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
         else:
             print("Invalid option, please enter an option in the below list")
     return
+
+def summarise_flow(client, console, filename):
+    """This function handles the entire document summarisation flow. It takes a filename and handles all the processes required to summarise the document and continue that route of the program."""
+
+    # Extract doc text
+    try:
+        document = get_document(filename)
+    except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
+        print(f"File not found.")
+        return
+    except ValueError as e:
+        print(e)
+        return
+
+    # Print document stats
+    char_count = len(document)
+    print(f"\nCharacters: {char_count:,}")
+    estimated_tokens = char_count / 4
+    print(f"Estimated tokens: {estimated_tokens:,.0f}")
+
+    prompt_type = get_prompt_type() # get prompt type from the user
+    summary = get_or_generate_summary(client, filename, document, prompt_type)
+    if not summary:
+        return
+    input("\nPress Enter to continue...")
+
+    post_summary_menu(client, console, filename, document, prompt_type, summary)
+    return
+
+def browse_flow(client, console):
+    """This function orchestrates the entire open past summary flow. If a user knows they've summarised a document before they can choose to re-open that summary and skip straight to the post summary options."""
+
+    if not os.path.exists("summaries"): # Check if folder exists
+        print("\nNo summaries saved")
+        return
+    
+    filepaths = os.listdir("summaries") # Get all filenames in folder
+    if not filepaths: # if no save files then exit
+        print("\nNo summaries saved.")
+        return
+
+    # Display file choices
+    print("\nSaved Summaries")
+    print("---------------")
+    loaded_summaries = []
+    for i, filepath in enumerate(filepaths):
+        filename = f"summaries/{filepath}"
+        with open(filename, "r") as f:
+            saved_summary = json.load(f)
+        print(f"{i+1}. {saved_summary['filename']}")
+        loaded_summaries.append(saved_summary)
+    print(f"{i+2}. Back to main menu")
+    print(f"{i+3}. Quit")
+
+    # Get input and load summary or quit.
+    back_to_main = False
+    while True:
+        filename_choice = input("Choice: ")
+        if filename_choice.isdigit() and 1 <= int(filename_choice) <= len(loaded_summaries):
+            saved_summary = loaded_summaries[int(filename_choice) - 1]
+            break
+        elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 1: # back to main menu
+            back_to_main = True
+            break
+        elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 2: # quit app
+            print("\nExiting...")
+            exit(0)
+        else:
+            print("Invalid choice, try again.")
+    if back_to_main:
+        return
+
+    # Set state after load
+    filename = saved_summary["filename"]
+    prompt_type = list(saved_summary["summaries"].keys())[0]
+    summary = saved_summary["summaries"][prompt_type]
+    tldr = saved_summary.get("tldr")
+    key_terms = saved_summary.get("key_terms")
+    display_summary_info(tldr, key_terms)
+    input("\nPress Enter to continue...")
+
+    try:
+        document = get_document(filename)
+    except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
+        print(f"File not found.")
+        return
+    except ValueError as e:
+        print(e)
+        return
+
+    # Call post summary loop.
+    post_summary_menu(client, console, filename, document, prompt_type, summary)
+    return
+
+def qa_mode(client, console, filename, summary, prompt_type):
+    """This function lets the user ask questions about a summarised document. It loads a summary, prompt_type and its filename and uses the summary as the conversation context."""
+
+    system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
+    print(f"\nQ&A Mode: {filename} ({prompt_type})")
+    print("-------------------------------------------------------------------")
+    print("type 'quit' to return to menu")
+    messages = []
+    while True:
+        user_message = input("\n>> ")
+        if user_message.lower().strip() == "quit":
+            print("Returning to post summary menu")
+            break
+        if not user_message.strip():
+            print("Please enter a question.")
+            continue
+        current_user_message = {"role": "user", "content": user_message}
+        messages.append(current_user_message)
+        try:
+            response = get_claude_response(client, messages, system_prompt)
+            print()
+            console.print(Markdown(response.content[0].text))
+            current_assistant_message = {"role": "assistant", "content": response.content[0].text}
+            messages.append(current_assistant_message)
+        except API_ERRORS as e:
+            print(f"\nFailed to get response from assistant. {e}")
+            print("There has been no API cost for this question. Please try again.")
+            messages.pop()
+    return
+
 # Main
 
 client = anthropic.Anthropic() # connect to anthropic API
@@ -399,84 +499,9 @@ while True:
         else:
             filename = input("\nEnter filename: ")
 
-        # Extract doc text
-        try:
-            document = get_document(filename)
-        except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
-            print(f"File not found.")
-            continue
-        except ValueError as e:
-            print(e)
-            continue
-
-        # Print document stats
-        char_count = len(document)
-        print(f"\nCharacters: {char_count:,}")
-        estimated_tokens = char_count / 4
-        print(f"Estimated tokens: {estimated_tokens:,.0f}")
-
-        prompt_type = get_prompt_type() # get prompt type from the user
-        summary = get_or_generate_summary(client, filename, document, prompt_type)
-        if not summary:
-            continue
-        input("\nPress Enter to continue...")
-
-        post_summary_menu(client, console, filename, document, prompt_type, summary)
+        summarise_flow(client, console, filename) # summarise / load summary and enter post summary menu
     elif choice == "2": # Browse
-        if not os.path.exists("summaries"):
-            print("\nNo summaries saved")
-            continue
-        filepaths = os.listdir("summaries")
-        if not filepaths:
-            print("\nNo summaries saved.")
-            continue
-        print("\nSaved Summaries")
-        print("---------------")
-        loaded_summaries = []
-        for i, filepath in enumerate(filepaths):
-            filename = f"summaries/{filepath}"
-            with open(filename, "r") as f:
-                saved_summary = json.load(f)
-            print(f"{i+1}. {saved_summary['filename']}")
-            loaded_summaries.append(saved_summary)
-        print(f"{i+2}. Back to main menu")
-        print(f"{i+3}. Quit")
-        back_to_main = False
-        while True:
-            filename_choice = input("Choice: ")
-            if filename_choice.isdigit() and 1 <= int(filename_choice) <= len(loaded_summaries):
-                saved_summary = loaded_summaries[int(filename_choice) - 1]
-                break
-            elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 1: # back to main menu
-                back_to_main = True
-                break
-            elif filename_choice.isdigit() and int(filename_choice) == len(loaded_summaries) + 2: # quit app
-                print("\nExiting...")
-                exit(0)
-            else:
-                print("Invalid choice, try again.")
-        if back_to_main:
-            continue
-        # Set state after load
-        filename = saved_summary["filename"]
-        prompt_type = list(saved_summary["summaries"].keys())[0]
-        summary = saved_summary["summaries"][prompt_type]
-        tldr = saved_summary.get("tldr")
-        key_terms = saved_summary.get("key_terms")
-        display_summary_info(tldr, key_terms)
-        input("\nPress Enter to continue...")
-
-        try:
-            document = get_document(filename)
-        except (FileNotFoundError, pymupdf.FileNotFoundError, PackageNotFoundError):
-            print(f"File not found.")
-            continue
-        except ValueError as e:
-            print(e)
-            continue
-
-        # Call post summary loop.
-        post_summary_menu(client, console, filename, document, prompt_type, summary)
+        browse_flow(client, console)
     elif choice == "3": # Quit
         print("\nExiting...")
         exit(0)
