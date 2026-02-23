@@ -331,7 +331,29 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
                 input("\nPress Enter to continue...")
                 continue
         elif choice == "3": # Enter Q&A mode
-            print("\nNot Here yet")
+            system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
+            print(f"\nQ&A Mode: {filename} ({prompt_type}) - type quit to return to menu.")
+            print("-------------------------------------------------------------------")
+            print("type 'exit' to return to menu")
+            messages = []
+            while True:
+                user_message = input("\n>> ")
+                if user_message.lower().strip() == "quit":
+                    print("Returning to post summary menu")
+                    break
+                else:
+                    current_user_message = {"role": "user", "content": user_message}
+                    messages.append(current_user_message)
+                    try:
+                        response = get_claude_response(client, messages, system_prompt)
+                        print()
+                        console.print(Markdown(response.content[0].text))
+                        current_assistant_message = {"role": "assistant", "content": response.content[0].text}
+                        messages.append(current_assistant_message)
+                    except API_ERRORS as e:
+                        print(f"\nFailed to get response from assistant. {e}")
+                        print("There has been no API cost for this question. Please try again.")
+                        messages.pop()
         elif choice == "4": # Back to main menu
             break
         elif choice == "5": # Quit
