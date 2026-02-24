@@ -334,10 +334,11 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
             console.print(Markdown(summary))
             input("\nPress Enter to continue...")
         elif choice == "2": # Change summary type
-            prompt_type = get_prompt_type()
-            result = get_or_generate_summary(client, filename, document, prompt_type)
+            new_prompt_type = get_prompt_type()
+            result = get_or_generate_summary(client, filename, document, new_prompt_type)
             if result:
                 summary = result
+                prompt_type = new_prompt_type
             input("\nPress Enter to continue...")
         elif choice == "3": # Enter Q&A mode
             qa_mode(client, console, filename, summary, prompt_type)
