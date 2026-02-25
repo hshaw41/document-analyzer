@@ -2,6 +2,7 @@ import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from striprtf.striprtf import rtf_to_text
@@ -171,7 +172,6 @@ def summarise_document(client, document, prompt_type):
     output_cost = 0
 
     if len(chunked_document) == 1: # if single chunk
-        print("\nSummarizing...")
         system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
         temperature = 0.5
         messages = [
@@ -181,7 +181,14 @@ def summarise_document(client, document, prompt_type):
             }
         ]
         try:
-            response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                TimeElapsedColumn(),
+            )
+            with progress:
+                task = progress.add_task("Summarising...", total=None)
+                response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             message = response.parse()
             input_cost, output_cost = calculate_response_cost(message)
             result = json.loads(message.content[0].text)
@@ -200,30 +207,39 @@ def summarise_document(client, document, prompt_type):
         reset_time_utc = datetime.now(timezone.utc)
         print()
         try:
-            for i, chunk in enumerate(chunked_document):
-                print(f"Summarizing chunk {i + 1}/{len(chunked_document)}...")
-                messages = [
-                    {
-                        "role": "user",
-                        "content": chunk
-                    }
-                ]
-                estimated_next_tokens = (len(chunk) + len(map_prompt)) / 4
-                if tokens_remaining < estimated_next_tokens:
-                    current_time_utc = datetime.now(timezone.utc)
-                    time_delta = reset_time_utc - current_time_utc
-                    seconds_to_sleep = time_delta.total_seconds()
-                    if seconds_to_sleep > 0:
-                        time.sleep(seconds_to_sleep)
-                response = get_claude_response(client, messages, map_prompt, temperature)
-                message = response.parse()
-                summaries += "\n\n" + message.content[0].text
-                chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
-                input_cost += chunk_input_cost
-                output_cost += chunk_output_cost
-                tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
-                reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
-                reset_time_utc = datetime.fromisoformat(reset_time_string)
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                TimeElapsedColumn(),
+            )
+            with progress:
+                task = progress.add_task("Starting...", total = len(chunked_document))
+                for i, chunk in enumerate(chunked_document):
+                    progress.update(task, description=f"Summarising Chunk {i + 1}/{len(chunked_document)}")
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": chunk
+                        }
+                    ]
+                    estimated_next_tokens = (len(chunk) + len(map_prompt)) / 4
+                    if tokens_remaining < estimated_next_tokens:
+                        current_time_utc = datetime.now(timezone.utc)
+                        time_delta = reset_time_utc - current_time_utc
+                        seconds_to_sleep = time_delta.total_seconds()
+                        if seconds_to_sleep > 0:
+                            time.sleep(seconds_to_sleep)
+                    response = get_claude_response(client, messages, map_prompt, temperature)
+                    progress.advance(task)
+                    message = response.parse()
+                    summaries += "\n\n" + message.content[0].text
+                    chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
+                    input_cost += chunk_input_cost
+                    output_cost += chunk_output_cost
+                    tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
+                    reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
+                    reset_time_utc = datetime.fromisoformat(reset_time_string)
         except API_ERRORS as e:
             print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
             if not summaries: # No summaries were generated yet?
@@ -232,7 +248,6 @@ def summarise_document(client, document, prompt_type):
                 return
             else:
                 print(f"Attempting partial summary from {i} completed chunks.")
-        print(f"\nGenerating final summary...")
         reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         messages = [
             {
@@ -242,13 +257,20 @@ def summarise_document(client, document, prompt_type):
         ]
         try:
             estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
-            if tokens_remaining < estimated_next_tokens:
-                current_time_utc = datetime.now(timezone.utc)
-                time_delta = reset_time_utc - current_time_utc
-                seconds_to_sleep = time_delta.total_seconds()
-                if seconds_to_sleep > 0:
-                    time.sleep(seconds_to_sleep)
-            response = get_claude_response(client, messages, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                TimeElapsedColumn(),
+            )
+            with progress:
+                task = progress.add_task("Generating final summary...", total=None)
+                if tokens_remaining < estimated_next_tokens:
+                    current_time_utc = datetime.now(timezone.utc)
+                    time_delta = reset_time_utc - current_time_utc
+                    seconds_to_sleep = time_delta.total_seconds()
+                    if seconds_to_sleep > 0:
+                        time.sleep(seconds_to_sleep)
+                response = get_claude_response(client, messages, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             message = response.parse()
             final_input_cost, final_output_cost = calculate_response_cost(message)
             input_cost += final_input_cost
