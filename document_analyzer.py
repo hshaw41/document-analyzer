@@ -5,6 +5,7 @@ from rich.markdown import Markdown
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from striprtf.striprtf import rtf_to_text
+from datetime import datetime, timezone
 import sys
 import time
 import pymupdf
@@ -56,6 +57,8 @@ SUMMARY_OUTPUT_CONFIG = {
     }
 }
 
+# Utilities
+
 def get_document(filename):
     """This function extracts all text from a document with a given filename and returns it. PDF, DOCX, RTF, Text and Markdown supported."""
 
@@ -95,7 +98,7 @@ def chunk_document(document, chunk_size):
                 clean_split_point = document.rfind("\n", current_position, split_point)
             if clean_split_point == -1: # if no newline find whitespace
                 clean_split_point = document.rfind(" ", current_position, split_point)
-            if clean_split_point == -1: # if no delimeters found split on the approximate split
+            if clean_split_point == -1: # if no delimiters found split on the approximate split
                 clean_split_point = split_point
             chunk = document[current_position:clean_split_point] # fill chunk
             current_position = clean_split_point + 1
@@ -104,6 +107,8 @@ def chunk_document(document, chunk_size):
             current_position = len(document)
         chunked_document.append(chunk) # add chunk to list
     return chunked_document
+
+# Display
 
 def display_summary_info(tldr, key_terms, input_cost=None, output_cost=None):
     """This function displays document summary information. It takes individual info items and displays them if the info is available."""
@@ -116,6 +121,8 @@ def display_summary_info(tldr, key_terms, input_cost=None, output_cost=None):
         total_cost = input_cost + output_cost
         print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
     return
+
+# API
 
 def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
     """This function sends a request to claude with a list of messages and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
@@ -131,23 +138,30 @@ def get_claude_response(client, messages, system_prompt, temperature=1.0, model=
     attempts = 3
     for attempt in range(attempts):
         try:
-            message = client.messages.create(**kwargs)
+            message = client.messages.with_raw_response.create(**kwargs)
             return message
         except anthropic.RateLimitError as e:
             last_error = e
             print(f"API Rate limit error. Attempt {attempt+1}/{attempts} failed. Retrying... ")
-            time.sleep(60)
+            retry_after = e.response.headers.get("retry-after")
+            if retry_after:
+                time.sleep(float(retry_after))
+            else:
+                time.sleep(60)
     raise last_error
 
 def calculate_response_cost(response, model=MODEL):
-    "This function calculates the input and output cost of a claude response API call."
+    """This function calculates the input and output cost of a claude response API call."""
 
     input_cost = (response.usage.input_tokens / 1000000) * MODEL_PRICING[model]["input"]
     output_cost = (response.usage.output_tokens / 1000000) * MODEL_PRICING[model]["output"]
     return input_cost, output_cost
 
+# Core Logic
+
 def summarise_document(client, document, prompt_type):
-    """This function takes a document and summarises it with a chosen prompt type"""
+    
+    """This function takes a document and summarises it with a chosen prompt type. It returns the summary, it's tldr, key-terms, input and output costs. It returns None on failure."""
 
     # Chunk document
     chunked_document = chunk_document(document, CHUNK_SIZE)
@@ -168,8 +182,9 @@ def summarise_document(client, document, prompt_type):
         ]
         try:
             response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
-            input_cost, output_cost = calculate_response_cost(response)
-            result = json.loads(response.content[0].text)
+            message = response.parse()
+            input_cost, output_cost = calculate_response_cost(message)
+            result = json.loads(message.content[0].text)
             summary = result["summary"]
             tldr = result["tldr"]
             key_terms = result["key_terms"]
@@ -181,6 +196,8 @@ def summarise_document(client, document, prompt_type):
     else:
         map_prompt = SUMMARY_PROMPTS[prompt_type]
         temperature = 0.5
+        tokens_remaining = 50000
+        reset_time_utc = datetime.now(timezone.utc)
         print()
         try:
             for i, chunk in enumerate(chunked_document):
@@ -191,12 +208,22 @@ def summarise_document(client, document, prompt_type):
                         "content": chunk
                     }
                 ]
+                estimated_next_tokens = (len(chunk) + len(map_prompt)) / 4
+                if tokens_remaining < estimated_next_tokens:
+                    current_time_utc = datetime.now(timezone.utc)
+                    time_delta = reset_time_utc - current_time_utc
+                    seconds_to_sleep = time_delta.total_seconds()
+                    if seconds_to_sleep > 0:
+                        time.sleep(seconds_to_sleep)
                 response = get_claude_response(client, messages, map_prompt, temperature)
-                summaries += "\n\n" + response.content[0].text
-                chunk_input_cost, chunk_output_cost = calculate_response_cost(response)
+                message = response.parse()
+                summaries += "\n\n" + message.content[0].text
+                chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
                 input_cost += chunk_input_cost
                 output_cost += chunk_output_cost
-                time.sleep(60)
+                tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
+                reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
+                reset_time_utc = datetime.fromisoformat(reset_time_string)
         except API_ERRORS as e:
             print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
             if not summaries: # No summaries were generated yet?
@@ -214,11 +241,19 @@ def summarise_document(client, document, prompt_type):
             }
         ]
         try:
+            estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
+            if tokens_remaining < estimated_next_tokens:
+                current_time_utc = datetime.now(timezone.utc)
+                time_delta = reset_time_utc - current_time_utc
+                seconds_to_sleep = time_delta.total_seconds()
+                if seconds_to_sleep > 0:
+                    time.sleep(seconds_to_sleep)
             response = get_claude_response(client, messages, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
-            final_input_cost, final_output_cost = calculate_response_cost(response)
+            message = response.parse()
+            final_input_cost, final_output_cost = calculate_response_cost(message)
             input_cost += final_input_cost
             output_cost += final_output_cost
-            result = json.loads(response.content[0].text)
+            result = json.loads(message.content[0].text)
             summary = result["summary"]
             tldr = result["tldr"]
             key_terms = result["key_terms"]
@@ -230,24 +265,29 @@ def summarise_document(client, document, prompt_type):
             return summaries, tldr, key_terms, input_cost, output_cost
     return summary, tldr, key_terms, input_cost, output_cost
 
-def get_prompt_type():
-    """This function asks the user which prompt type they would like to set for their summarisation and returns that prompt type."""
+def get_or_generate_summary(client, filename, document, prompt_type):
+    """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
 
-    # Get prompt type from user
-    print("\nSelect prompt type from:")
-    prompt_keys = list(SUMMARY_PROMPTS.keys())
-    for i, prompt_type in enumerate(prompt_keys):
-        print(f"{i+1}. {prompt_type}")
-    while True:
-        prompt_type_choice = input("Choice: ")
-        if prompt_type_choice.isdigit() and 1 <= int(prompt_type_choice) <= len(prompt_keys):
-            prompt_type = prompt_keys[int(prompt_type_choice) - 1]
-            break
-        print("Invalid choice, try again.")
-    return prompt_type
+    saved_summary = load_summary(filename)
+    if saved_summary and prompt_type in saved_summary["summaries"]:
+        print("\nCached summary loaded.")
+        summary = saved_summary["summaries"][prompt_type]
+        tldr = saved_summary.get("tldr")
+        key_terms = saved_summary.get("key_terms")
+        display_summary_info(tldr, key_terms)
+    else:
+        summary_result = summarise_document(client, document, prompt_type)
+        if not summary_result:
+            return
+        summary, tldr, key_terms, input_cost, output_cost = summary_result
+        display_summary_info(tldr, key_terms, input_cost, output_cost)
+        save_summary(filename, summary, prompt_type, tldr, key_terms)
+    return summary
+
+# Saving / Persistence
 
 def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
-    """This function caches summaries to a file for later retrieval."""
+    """This function caches summaries to a file for later retrieval. If a save file already exists and we're saving a new summary for a different prompt type, that gets saved as well as the old summaries. When updating if tldrs or key-terms don't exist the function will backfill them."""
 
     document_name = os.path.basename(filename).replace(".", "_")
     filepath = f"summaries/{document_name}_summary.json"
@@ -297,59 +337,25 @@ def load_summary(filename):
         return saved_summary
     return
 
-def get_or_generate_summary(client, filename, document, prompt_type):
-    """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
+# UI Input
 
-    saved_summary = load_summary(filename)
-    if saved_summary and prompt_type in saved_summary["summaries"]:
-        print("\nCached summary loaded.")
-        summary = saved_summary["summaries"][prompt_type]
-        tldr = saved_summary.get("tldr")
-        key_terms = saved_summary.get("key_terms")
-        display_summary_info(tldr, key_terms)
-    else:
-        summary_result = summarise_document(client, document, prompt_type)
-        if not summary_result:
-            return
-        summary, tldr, key_terms, input_cost, output_cost = summary_result
-        display_summary_info(tldr, key_terms, input_cost, output_cost)
-        save_summary(filename, summary, prompt_type, tldr, key_terms)
-    return summary
+def get_prompt_type():
+    """This function asks the user which prompt type they would like to set for their summarisation and returns that prompt type."""
 
-def post_summary_menu(client, console, filename, document, prompt_type, summary):
-    """This function displays a menu to the user that allows them to choose options after summarising a document of what they would like to do with the summary.
-    It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
-
+    # Get prompt type from user
+    print("\nSelect prompt type from:")
+    prompt_keys = list(SUMMARY_PROMPTS.keys())
+    for i, prompt_type in enumerate(prompt_keys):
+        print(f"{i+1}. {prompt_type}")
     while True:
-        print(f"\nSummary: {filename} ({prompt_type})")
-        print("-------------------------------------------------------------------")
-        print("1. Read full summary.")
-        print("2. Change summary type.")
-        print("3. Enter Q&A mode.")
-        print("4. Back to main menu.")
-        print("5. Quit")
-        choice = input("Enter the number that matches your chosen option: ")
-        if choice == "1": # Print Summary
-            print()
-            console.print(Markdown(summary))
-            input("\nPress Enter to continue...")
-        elif choice == "2": # Change summary type
-            new_prompt_type = get_prompt_type()
-            result = get_or_generate_summary(client, filename, document, new_prompt_type)
-            if result:
-                summary = result
-                prompt_type = new_prompt_type
-            input("\nPress Enter to continue...")
-        elif choice == "3": # Enter Q&A mode
-            qa_mode(client, console, filename, summary, prompt_type)
-        elif choice == "4": # Back to main menu
+        prompt_type_choice = input("Choice: ")
+        if prompt_type_choice.isdigit() and 1 <= int(prompt_type_choice) <= len(prompt_keys):
+            prompt_type = prompt_keys[int(prompt_type_choice) - 1]
             break
-        elif choice == "5": # Quit
-            print("\nExiting...")
-            exit(0)
-        else:
-            print("Invalid option, please enter an option in the below list")
-    return
+        print("Invalid choice, try again.")
+    return prompt_type
+
+# Program Flows
 
 def summarise_flow(client, console, filename):
     """This function handles the entire document summarisation flow. It takes a filename and handles all the processes required to summarise the document and continue that route of the program."""
@@ -445,7 +451,7 @@ def browse_flow(client, console):
     return
 
 def qa_mode(client, console, filename, summary, prompt_type):
-    """This function lets the user ask questions about a summarised document. It loads a summary, prompt_type and its filename and uses the summary as the conversation context."""
+    """This function lets the user ask questions about a summarised document. It takes a summary, prompt_type and its filename and uses the summary as the conversation context."""
 
     system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
     print(f"\nQ&A Mode: {filename} ({prompt_type})")
@@ -464,14 +470,50 @@ def qa_mode(client, console, filename, summary, prompt_type):
         messages.append(current_user_message)
         try:
             response = get_claude_response(client, messages, system_prompt)
+            message = response.parse()
             print()
-            console.print(Markdown(response.content[0].text))
-            current_assistant_message = {"role": "assistant", "content": response.content[0].text}
+            console.print(Markdown(message.content[0].text))
+            current_assistant_message = {"role": "assistant", "content": message.content[0].text}
             messages.append(current_assistant_message)
         except API_ERRORS as e:
             print(f"\nFailed to get response from assistant. {e}")
             print("There has been no API cost for this question. Please try again.")
             messages.pop()
+    return
+
+def post_summary_menu(client, console, filename, document, prompt_type, summary):
+    """This function displays a menu to the user that allows them to choose options after summarising a document of what they would like to do with the summary.
+    It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
+
+    while True:
+        print(f"\nSummary: {filename} ({prompt_type})")
+        print("-------------------------------------------------------------------")
+        print("1. Read full summary.")
+        print("2. Change summary type.")
+        print("3. Enter Q&A mode.")
+        print("4. Back to main menu.")
+        print("5. Quit")
+        choice = input("Enter the number that matches your chosen option: ")
+        if choice == "1": # Print Summary
+            print()
+            console.print(Markdown(summary))
+            input("\nPress Enter to continue...")
+        elif choice == "2": # Change summary type
+            new_prompt_type = get_prompt_type()
+            result = get_or_generate_summary(client, filename, document, new_prompt_type)
+            if result:
+                summary = result
+                prompt_type = new_prompt_type
+            input("\nPress Enter to continue...")
+        elif choice == "3": # Enter Q&A mode
+            qa_mode(client, console, filename, summary, prompt_type)
+        elif choice == "4": # Back to main menu
+            break
+        elif choice == "5": # Quit
+            print("\nExiting...")
+            exit(0)
+        else:
+            print("Invalid option, please enter an option in the below list")
     return
 
 # Main
