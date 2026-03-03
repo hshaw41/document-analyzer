@@ -12,6 +12,7 @@ import time
 import pymupdf
 import os
 import json
+import argparse
 
 load_dotenv()
 
@@ -57,6 +58,8 @@ SUMMARY_OUTPUT_CONFIG = {
         }
     }
 }
+
+DEBUG = True
 
 # Utilities
 
@@ -111,16 +114,28 @@ def chunk_document(document, chunk_size):
 
 # Display
 
-def display_summary_info(tldr, key_terms, input_cost=None, output_cost=None):
+def display_summary_info(tldr, key_terms):
     """This function displays document summary information. It takes individual info items and displays them if the info is available."""
 
     if tldr:
         print(f"\nTLDR: {tldr}")
     if key_terms:
         print(f"\nKey Terms: {', '.join(key_terms)}")
+    return
+
+def display_debug_info(model, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost):
+    """This summary displays debug information for developers. It displays the Model, document characters, document estimated tokens, actual input and output tokens sent to the model, chunks if applicable and the cost breakdown."""
+
+    print("\n[DEBUG]")
+    print(f"Model: {model}")
+    print(f"Characters: {char_count}")
+    print(f"Estimated Tokens: {estimated_tokens}")
+    if input_tokens and output_tokens:
+        print(f"Actual Tokens: {input_tokens} in / {output_tokens} out")
+    if chunks:
+        print(f"Chunks: {chunks}")
     if input_cost and output_cost:
-        total_cost = input_cost + output_cost
-        print(f"\nCost Breakdown\n--------------------\nInput: ${input_cost:.6f}\nOutput: ${output_cost:.6f}\nTotal: ${total_cost:.6f}")
+        print(f"Cost: ${input_cost:.6f} in / ${output_cost:.6f} out / {(input_cost+output_cost):.6f} total")
     return
 
 # API
@@ -166,12 +181,15 @@ def summarise_document(client, document, prompt_type):
 
     # Chunk document
     chunked_document = chunk_document(document, CHUNK_SIZE)
+    chunks = len(chunked_document)
 
     summaries = ""
     input_cost = 0
     output_cost = 0
+    input_tokens = 0
+    output_tokens = 0
 
-    if len(chunked_document) == 1: # if single chunk
+    if chunks == 1: # if single chunk
         system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
         temperature = 0.5
         messages = [
@@ -191,6 +209,8 @@ def summarise_document(client, document, prompt_type):
                 response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
             message = response.parse()
             input_cost, output_cost = calculate_response_cost(message)
+            input_tokens = message.usage.input_tokens
+            output_tokens = message.usage.output_tokens
             result = json.loads(message.content[0].text)
             summary = result["summary"]
             tldr = result["tldr"]
@@ -214,9 +234,9 @@ def summarise_document(client, document, prompt_type):
                 TimeElapsedColumn(),
             )
             with progress:
-                task = progress.add_task("Starting...", total = len(chunked_document))
+                task = progress.add_task("Starting...", total = chunks)
                 for i, chunk in enumerate(chunked_document):
-                    progress.update(task, description=f"Summarising Chunk {i + 1}/{len(chunked_document)}")
+                    progress.update(task, description=f"Summarising Chunk {i + 1}/{chunks}")
                     messages = [
                         {
                             "role": "user",
@@ -237,11 +257,13 @@ def summarise_document(client, document, prompt_type):
                     chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
                     input_cost += chunk_input_cost
                     output_cost += chunk_output_cost
+                    input_tokens += message.usage.input_tokens
+                    output_tokens += message.usage.output_tokens
                     tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
                     reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
                     reset_time_utc = datetime.fromisoformat(reset_time_string)
         except API_ERRORS as e:
-            print(f"Failed on chunk {i + 1}/{len(chunked_document)}")
+            print(f"Failed on chunk {i + 1}/{chunks}")
             if not summaries: # No summaries were generated yet?
                 print("No chunks summarised.")
                 print("There has been no API cost for this summary.")
@@ -275,6 +297,8 @@ def summarise_document(client, document, prompt_type):
             final_input_cost, final_output_cost = calculate_response_cost(message)
             input_cost += final_input_cost
             output_cost += final_output_cost
+            input_tokens += message.usage.input_tokens
+            output_tokens += message.usage.output_tokens
             result = json.loads(message.content[0].text)
             summary = result["summary"]
             tldr = result["tldr"]
@@ -284,12 +308,14 @@ def summarise_document(client, document, prompt_type):
             print("Displaying successful chunk summaries")
             tldr=None
             key_terms=None
-            return summaries, tldr, key_terms, input_cost, output_cost
-    return summary, tldr, key_terms, input_cost, output_cost
+            return summaries, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
+    return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
 
 def get_or_generate_summary(client, filename, document, prompt_type):
     """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
 
+    char_count = len(document)
+    estimated_tokens = char_count / 4
     saved_summary = load_summary(filename)
     if saved_summary and prompt_type in saved_summary["summaries"]:
         print("\nCached summary loaded.")
@@ -301,8 +327,10 @@ def get_or_generate_summary(client, filename, document, prompt_type):
         summary_result = summarise_document(client, document, prompt_type)
         if not summary_result:
             return
-        summary, tldr, key_terms, input_cost, output_cost = summary_result
-        display_summary_info(tldr, key_terms, input_cost, output_cost)
+        summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost = summary_result
+        display_summary_info(tldr, key_terms)
+        if DEBUG:
+            display_debug_info(MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
         save_summary(filename, summary, prompt_type, tldr, key_terms)
     return summary
 
@@ -391,12 +419,6 @@ def summarise_flow(client, console, filename):
     except ValueError as e:
         print(e)
         return
-
-    # Print document stats
-    char_count = len(document)
-    print(f"\nCharacters: {char_count:,}")
-    estimated_tokens = char_count / 4
-    print(f"Estimated tokens: {estimated_tokens:,.0f}")
 
     prompt_type = get_prompt_type() # get prompt type from the user
     summary = get_or_generate_summary(client, filename, document, prompt_type)
@@ -543,9 +565,12 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
 client = anthropic.Anthropic() # connect to anthropic API
 console = Console() # instantiate console formatting tools
 
-cli_filename = None
-if len(sys.argv) > 1:
-    cli_filename = sys.argv[1]
+parser = argparse.ArgumentParser()
+parser.add_argument("filename", nargs="?", default=None)
+parser.add_argument("--debug", action="store_true")
+args = parser.parse_args()
+DEBUG = args.debug
+cli_filename = args.filename
 
 while True:
     # Main menu
