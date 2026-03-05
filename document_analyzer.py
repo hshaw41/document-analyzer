@@ -7,7 +7,6 @@ from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from striprtf.striprtf import rtf_to_text
 from datetime import datetime, timezone
-import sys
 import time
 import pymupdf
 import os
@@ -25,6 +24,7 @@ MODEL_PRICING = {
 MODEL = "claude-haiku-4-5"
 CHUNK_SIZE = 40000
 CHARS_PER_TOKEN = 4
+THINKING_BUDGET = 10000
 
 SUMMARY_PROMPTS = {
     "simple": "You are a science communicator who explains complex research to general audiences. summarise this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
@@ -58,8 +58,6 @@ SUMMARY_OUTPUT_CONFIG = {
         }
     }
 }
-
-DEBUG = True
 
 # Utilities
 
@@ -140,7 +138,7 @@ def display_debug_info(model, char_count, estimated_tokens, input_tokens, output
 
 # API
 
-def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None):
+def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None, thinking_budget=None):
     """This function sends a request to claude with a list of messages and system prompt. Request parameters also can be set and have defaults, these are, temperature, model and maximum tokens. Optionally output_config can also be provided, otherwise it will not be used."""
     kwargs = {
         "model": model,
@@ -151,6 +149,12 @@ def get_claude_response(client, messages, system_prompt, temperature=1.0, model=
     }
     if output_config:
         kwargs["output_config"] = output_config
+    if thinking_budget:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        kwargs["max_tokens"] = max_tokens + thinking_budget # adding thinking budget to the total token budget
+        if temperature != 1.0:
+            print("Warning: can't have temperature below 1.0 when thinking is enabled. Setting back to 1.0")
+            kwargs["temperature"] = 1.0 # forcing temp to be one because thinking only works when this is the case
     attempts = 3
     for attempt in range(attempts):
         try:
@@ -175,7 +179,7 @@ def calculate_response_cost(response, model=MODEL):
 
 # Core Logic
 
-def summarise_document(client, document, prompt_type):
+def summarise_document(client, document, prompt_type, extended_thinking):
     
     """This function takes a document and summarises it with a chosen prompt type. It returns the summary, it's tldr, key-terms, input and output costs. It returns None on failure."""
 
@@ -188,10 +192,13 @@ def summarise_document(client, document, prompt_type):
     output_cost = 0
     input_tokens = 0
     output_tokens = 0
+    if extended_thinking == True:
+        thinking_budget = THINKING_BUDGET
+    else:
+        thinking_budget = None
 
     if chunks == 1: # if single chunk
         system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
-        temperature = 0.5
         messages = [
             {
                 "role": "user",
@@ -206,12 +213,13 @@ def summarise_document(client, document, prompt_type):
             )
             with progress:
                 task = progress.add_task("Summarising...", total=None)
-                response = get_claude_response(client, messages, system_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+                response = get_claude_response(client, messages, system_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
             message = response.parse()
+            message_text = next(message_block.text for message_block in message.content if message_block.type == "text")
             input_cost, output_cost = calculate_response_cost(message)
             input_tokens = message.usage.input_tokens
             output_tokens = message.usage.output_tokens
-            result = json.loads(message.content[0].text)
+            result = json.loads(message_text)
             summary = result["summary"]
             tldr = result["tldr"]
             key_terms = result["key_terms"]
@@ -222,7 +230,6 @@ def summarise_document(client, document, prompt_type):
 
     else:
         map_prompt = SUMMARY_PROMPTS[prompt_type]
-        temperature = 0.5
         tokens_remaining = 50000
         reset_time_utc = datetime.now(timezone.utc)
         print()
@@ -250,10 +257,11 @@ def summarise_document(client, document, prompt_type):
                         seconds_to_sleep = time_delta.total_seconds()
                         if seconds_to_sleep > 0:
                             time.sleep(seconds_to_sleep)
-                    response = get_claude_response(client, messages, map_prompt, temperature)
+                    response = get_claude_response(client, messages, map_prompt, thinking_budget=thinking_budget)
                     progress.advance(task)
                     message = response.parse()
-                    summaries += "\n\n" + message.content[0].text
+                    message_text = next(message_block.text for message_block in message.content if message_block.type == "text")
+                    summaries += "\n\n" + message_text
                     chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
                     input_cost += chunk_input_cost
                     output_cost += chunk_output_cost
@@ -292,14 +300,15 @@ def summarise_document(client, document, prompt_type):
                     seconds_to_sleep = time_delta.total_seconds()
                     if seconds_to_sleep > 0:
                         time.sleep(seconds_to_sleep)
-                response = get_claude_response(client, messages, reduce_prompt, temperature, output_config=SUMMARY_OUTPUT_CONFIG)
+                response = get_claude_response(client, messages, reduce_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
             message = response.parse()
+            message_text = next(message_block.text for message_block in message.content if message_block.type == "text")
             final_input_cost, final_output_cost = calculate_response_cost(message)
             input_cost += final_input_cost
             output_cost += final_output_cost
             input_tokens += message.usage.input_tokens
             output_tokens += message.usage.output_tokens
-            result = json.loads(message.content[0].text)
+            result = json.loads(message_text)
             summary = result["summary"]
             tldr = result["tldr"]
             key_terms = result["key_terms"]
@@ -311,7 +320,7 @@ def summarise_document(client, document, prompt_type):
             return summaries, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
     return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
 
-def get_or_generate_summary(client, filename, document, prompt_type):
+def get_or_generate_summary(client, filename, document, prompt_type, extended_thinking):
     """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
 
     char_count = len(document)
@@ -324,7 +333,7 @@ def get_or_generate_summary(client, filename, document, prompt_type):
         key_terms = saved_summary.get("key_terms")
         display_summary_info(tldr, key_terms)
     else:
-        summary_result = summarise_document(client, document, prompt_type)
+        summary_result = summarise_document(client, document, prompt_type, extended_thinking)
         if not summary_result:
             return
         summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost = summary_result
@@ -421,7 +430,7 @@ def summarise_flow(client, console, filename):
         return
 
     prompt_type = get_prompt_type() # get prompt type from the user
-    summary = get_or_generate_summary(client, filename, document, prompt_type)
+    summary = get_or_generate_summary(client, filename, document, prompt_type, False) # TODO Make extended thinking an option for the initial summary.
     if not summary:
         return
     input("\nPress Enter to continue...")
@@ -494,9 +503,13 @@ def browse_flow(client, console):
     post_summary_menu(client, console, filename, document, prompt_type, summary)
     return
 
-def qa_mode(client, console, filename, summary, prompt_type):
+def qa_mode(client, console, filename, summary, prompt_type, extended_thinking):
     """This function lets the user ask questions about a summarised document. It takes a summary, prompt_type and its filename and uses the summary as the conversation context."""
 
+    if extended_thinking == True:
+        thinking_budget = THINKING_BUDGET
+    else:
+        thinking_budget = None
     system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
     print(f"\nQ&A Mode: {filename} ({prompt_type})")
     print("-------------------------------------------------------------------")
@@ -513,11 +526,12 @@ def qa_mode(client, console, filename, summary, prompt_type):
         current_user_message = {"role": "user", "content": user_message}
         messages.append(current_user_message)
         try:
-            response = get_claude_response(client, messages, system_prompt)
+            response = get_claude_response(client, messages, system_prompt, thinking_budget=thinking_budget)
             message = response.parse()
+            message_text = next(message_block.text for message_block in message.content if message_block.type == "text")
             print()
-            console.print(Markdown(message.content[0].text))
-            current_assistant_message = {"role": "assistant", "content": message.content[0].text}
+            console.print(Markdown(message_text))
+            current_assistant_message = {"role": "assistant", "content": message_text}
             messages.append(current_assistant_message)
         except API_ERRORS as e:
             print(f"\nFailed to get response from assistant. {e}")
@@ -529,14 +543,19 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
     """This function displays a menu to the user that allows them to choose options after summarising a document of what they would like to do with the summary.
     It takes the state variables of a summary as parameters. Then offers to print the full summary, change the summary type, enter Q&A mode or leave the menu."""
 
+    extended_thinking = False
     while True:
         print(f"\nSummary: {filename} ({prompt_type})")
         print("-------------------------------------------------------------------")
         print("1. Read full summary.")
         print("2. Change summary type.")
         print("3. Enter Q&A mode.")
-        print("4. Back to main menu.")
-        print("5. Quit")
+        if extended_thinking:
+            print("4. Extended thinking [ON]")
+        else:
+            print("4. Extended thinking [OFF]")
+        print("5. Back to main menu.")
+        print("6. Quit")
         choice = input("Enter the number that matches your chosen option: ")
         if choice == "1": # Print Summary
             print()
@@ -544,16 +563,23 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
             input("\nPress Enter to continue...")
         elif choice == "2": # Change summary type
             new_prompt_type = get_prompt_type()
-            result = get_or_generate_summary(client, filename, document, new_prompt_type)
+            result = get_or_generate_summary(client, filename, document, new_prompt_type, extended_thinking)
             if result:
                 summary = result
                 prompt_type = new_prompt_type
             input("\nPress Enter to continue...")
         elif choice == "3": # Enter Q&A mode
-            qa_mode(client, console, filename, summary, prompt_type)
-        elif choice == "4": # Back to main menu
+            qa_mode(client, console, filename, summary, prompt_type, extended_thinking)
+        elif choice == "4": # Toggle extended thinking
+            if extended_thinking:
+                extended_thinking = False
+                print("\nExtended thinking toggled OFF")
+            else:
+                extended_thinking = True
+                print("\nExtended thinking toggled ON")
+        elif choice == "5": # Back to main menu
             break
-        elif choice == "5": # Quit
+        elif choice == "6": # Quit
             print("\nExiting...")
             exit(0)
         else:
