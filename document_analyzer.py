@@ -179,7 +179,7 @@ def calculate_response_cost(response, model=MODEL):
 
 # Core Logic
 
-def summarise_document(client, document, prompt_type, extended_thinking):
+def summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries=None):
     
     """This function takes a document and summarises it with a chosen prompt type. It returns the summary, it's tldr, key-terms, input and output costs. It returns None on failure."""
 
@@ -187,7 +187,16 @@ def summarise_document(client, document, prompt_type, extended_thinking):
     chunked_document = chunk_document(document, CHUNK_SIZE)
     chunks = len(chunked_document)
 
-    summaries = ""
+    chunk_summaries = [] # tracks individual chunk summaries in a list
+
+    if saved_chunk_summaries:
+        chunk_summaries = saved_chunk_summaries
+        summaries = "\n\n".join(saved_chunk_summaries)
+        start_index = len(saved_chunk_summaries)
+    else:
+        summaries = ""
+        start_index = 0
+
     input_cost = 0
     output_cost = 0
     input_tokens = 0
@@ -241,8 +250,14 @@ def summarise_document(client, document, prompt_type, extended_thinking):
                 TimeElapsedColumn(),
             )
             with progress:
-                task = progress.add_task("Starting...", total = chunks)
+                if saved_chunk_summaries:
+                    task = progress.add_task(f"Resuming from chunk {start_index + 1}...", total=chunks)
+                    progress.update(task, completed=start_index)
+                else:
+                    task = progress.add_task("Starting...", total = chunks)
                 for i, chunk in enumerate(chunked_document):
+                    if i < start_index:
+                        continue
                     progress.update(task, description=f"Summarising Chunk {i + 1}/{chunks}")
                     messages = [
                         {
@@ -261,6 +276,7 @@ def summarise_document(client, document, prompt_type, extended_thinking):
                     progress.advance(task)
                     message = response.parse()
                     message_text = next(message_block.text for message_block in message.content if message_block.type == "text")
+                    chunk_summaries.append(message_text)
                     summaries += "\n\n" + message_text
                     chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
                     input_cost += chunk_input_cost
@@ -272,7 +288,7 @@ def summarise_document(client, document, prompt_type, extended_thinking):
                     reset_time_utc = datetime.fromisoformat(reset_time_string)
         except API_ERRORS as e:
             print(f"Failed on chunk {i + 1}/{chunks}")
-            if not summaries: # No summaries were generated yet?
+            if not chunk_summaries: # No summaries were generated yet?
                 print("No chunks summarised.")
                 print("There has been no API cost for this summary.")
                 return
@@ -317,8 +333,8 @@ def summarise_document(client, document, prompt_type, extended_thinking):
             print("Displaying successful chunk summaries")
             tldr=None
             key_terms=None
-            return summaries, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
-    return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost
+            return summaries, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries
+    return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, None
 
 def get_or_generate_summary(client, filename, document, prompt_type, extended_thinking):
     """This function gets a summary and returns it, either by retrieving it from a saved summary or generating a new one."""
@@ -326,21 +342,38 @@ def get_or_generate_summary(client, filename, document, prompt_type, extended_th
     char_count = len(document)
     estimated_tokens = char_count / 4
     saved_summary = load_summary(filename)
-    if saved_summary and prompt_type in saved_summary["summaries"]:
+    if saved_summary and "summaries" in saved_summary and prompt_type in saved_summary["summaries"]:
         print("\nCached summary loaded.")
         summary = saved_summary["summaries"][prompt_type]
         tldr = saved_summary.get("tldr")
         key_terms = saved_summary.get("key_terms")
         display_summary_info(tldr, key_terms)
     else:
-        summary_result = summarise_document(client, document, prompt_type, extended_thinking)
+        saved_chunk_summaries = None
+        if saved_summary and "partial_summaries" in saved_summary and saved_summary.get("partial_prompt_type") == prompt_type:
+            saved_chunk_summaries = saved_summary["partial_summaries"]
+            print(f"\nResuming summarisation from chunk {len(saved_chunk_summaries)}.")
+
+        # Generate Summary
+        summary_result = summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries)
         if not summary_result:
             return
-        summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost = summary_result
+        # Parse result
+        summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries = summary_result
+
+        # Display
         display_summary_info(tldr, key_terms)
         if DEBUG:
             display_debug_info(MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
-        save_summary(filename, summary, prompt_type, tldr, key_terms)
+        
+        # Persistence
+        if chunk_summaries: # partial failure, add partial summary to save file so summary can be resumed
+            save_partial_summaries(filename, chunk_summaries, prompt_type)
+        else: # successful summary, clear any partial summaries and save summary
+            clear_partial_summaries(filename)
+            save_summary(filename, summary, prompt_type, tldr, key_terms)
+
+            
     return summary
 
 # Saving / Persistence
@@ -370,6 +403,8 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
             saved_summary = json.load(f)
 
         file_changed = False
+        if "summaries" not in saved_summary:
+            saved_summary["summaries"] = {}
         if prompt_type not in saved_summary["summaries"]:
             saved_summary["summaries"][prompt_type] = summary
             file_changed = True
@@ -386,6 +421,7 @@ def save_summary(filename, summary, prompt_type, tldr=None, key_terms=None):
     return
 
 def load_summary(filename):
+
     """This function loads a summary from saved summaries, then returns the saved summary object."""
 
     document_name = os.path.basename(filename).replace(".", "_")
@@ -394,6 +430,45 @@ def load_summary(filename):
         with open(filepath, "r") as f:
             saved_summary = json.load(f)
         return saved_summary
+    return
+
+def save_partial_summaries(filename, chunk_summaries, prompt_type):
+    """This function takes a list of summaries for a chunked document and saves it to a save file under it's respective prompt type key."""
+
+    document_name = os.path.basename(filename).replace(".", "_")
+    filepath = f"summaries/{document_name}_summary.json"
+    os.makedirs("summaries", exist_ok=True)
+    if not os.path.exists(filepath): # Writing a new save file with partial summary
+        saved_summary = {
+            "filename": filename,
+            "partial_summaries": chunk_summaries,
+            "partial_prompt_type": prompt_type
+        }
+        with open(filepath, "w") as f:
+            json.dump(saved_summary, f, indent = 2)
+    else: # Updating existing save file with partial summary
+        with open(filepath, "r") as f:
+            saved_summary = json.load(f)
+
+        saved_summary["partial_summaries"] = chunk_summaries
+        saved_summary["partial_prompt_type"] = prompt_type
+
+        with open(filepath, "w") as f:
+            json.dump(saved_summary, f, indent=2)
+    return
+
+def clear_partial_summaries(filename):
+    """This function loads a save file and clears any partial summaries left within the file."""
+
+    document_name = os.path.basename(filename).replace(".", "_")
+    filepath = f"summaries/{document_name}_summary.json"
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            saved_summary = json.load(f)
+        saved_summary.pop("partial_summaries", None)
+        saved_summary.pop("partial_prompt_type", None)
+        with open(filepath, "w") as f:
+            json.dump(saved_summary, f, indent=2)
     return
 
 # UI Input
@@ -458,6 +533,8 @@ def browse_flow(client, console):
         filename = f"summaries/{filepath}"
         with open(filename, "r") as f:
             saved_summary = json.load(f)
+        if "summaries" not in saved_summary:
+            continue
         print(f"{i+1}. {saved_summary['filename']}")
         loaded_summaries.append(saved_summary)
     print(f"{i+2}. Back to main menu")
