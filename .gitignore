@@ -21,3 +21,8 @@ __pycache__/
 \test_doc.rtf
 \docs
 \summaries
+.aider*
+
+# Local-only (not tracked)
+CLAUDE.md
+excalidraw.log
