@@ -384,7 +384,7 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
     return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, None
 
 
-def get_or_generate_summary(client, filename, document, prompt_type, extended_thinking):
+def get_or_generate_summary(client, filename, document, prompt_type, extended_thinking, debug):
     """Retrieve a cached summary or generate a new one.
 
     Checks for a cached summary first. If not found, checks for partial chunk summaries
@@ -421,7 +421,7 @@ def get_or_generate_summary(client, filename, document, prompt_type, extended_th
     summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries = summary_result
 
     display_summary_info(tldr, key_terms)
-    if DEBUG:
+    if debug:
         display_debug_info(MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
 
     # Save progress — either partial (for resume) or complete
@@ -548,7 +548,7 @@ def get_prompt_type():
 # CLI Program Flows
 # ──────────────────────────────────────────────
 
-def summarise_flow(client, console, filename):
+def summarise_flow(client, console, filename, debug):
     """Handle the full summarise-a-document flow: extract text, pick prompt type, generate summary, enter post-summary menu."""
     try:
         document = get_document(filename)
@@ -561,15 +561,15 @@ def summarise_flow(client, console, filename):
 
     prompt_type = get_prompt_type()
     # TODO: Make extended thinking an option for the initial summary
-    summary = get_or_generate_summary(client, filename, document, prompt_type, False)
+    summary = get_or_generate_summary(client, filename, document, prompt_type, False, debug)
     if not summary:
         return
 
     input("\nPress Enter to continue...")
-    post_summary_menu(client, console, filename, document, prompt_type, summary)
+    post_summary_menu(client, console, filename, document, prompt_type, summary, debug)
 
 
-def browse_flow(client, console):
+def browse_flow(client, console, debug):
     """Let the user pick from previously saved summaries and jump straight to the post-summary menu."""
     if not os.path.exists("summaries"):
         print("\nNo summaries saved")
@@ -638,7 +638,7 @@ def browse_flow(client, console):
         print(e)
         return
 
-    post_summary_menu(client, console, filename, document, prompt_type, summary)
+    post_summary_menu(client, console, filename, document, prompt_type, summary, debug)
 
 
 def qa_mode(client, console, filename, summary, prompt_type, extended_thinking):
@@ -676,7 +676,7 @@ def qa_mode(client, console, filename, summary, prompt_type, extended_thinking):
             messages.pop()
 
 
-def post_summary_menu(client, console, filename, document, prompt_type, summary):
+def post_summary_menu(client, console, filename, document, prompt_type, summary, debug):
     """Post-summarisation menu: read summary, change type, Q&A, toggle thinking, or exit."""
     extended_thinking = False
 
@@ -700,7 +700,7 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
 
         elif choice == "2":
             new_prompt_type = get_prompt_type()
-            result = get_or_generate_summary(client, filename, document, new_prompt_type, extended_thinking)
+            result = get_or_generate_summary(client, filename, document, new_prompt_type, extended_thinking, debug)
             if result:
                 summary = result
                 prompt_type = new_prompt_type
@@ -728,38 +728,44 @@ def post_summary_menu(client, console, filename, document, prompt_type, summary)
 # Main
 # ──────────────────────────────────────────────
 
-client = anthropic.Anthropic()
-console = Console()
+def main():
 
-parser = argparse.ArgumentParser(description="Document Analyzer CLI — summarise documents and ask questions about them.")
-parser.add_argument("filename", nargs="?", default=None, help="path to a document file to summarise immediately")
-parser.add_argument("--debug", action="store_true", help="show token counts, costs, and other technical details")
-args = parser.parse_args()
-DEBUG = args.debug
-cli_filename = args.filename
+    client = anthropic.Anthropic()
+    console = Console()
 
-while True:
-    print("\nDocument Analyzer")
-    print("-----------------")
-    print("1. Summarise a document")
-    print("2. Open past summary")
-    print("3. Quit")
-    choice = input("Enter the number that matches your chosen option: ")
+    parser = argparse.ArgumentParser(description="Document Analyzer CLI — summarise documents and ask questions about them.")
+    parser.add_argument("filename", nargs="?", default=None, help="path to a document file to summarise immediately")
+    parser.add_argument("--debug", action="store_true", help="show token counts, costs, and other technical details")
+    args = parser.parse_args()
+    debug = args.debug
+    cli_filename = args.filename
 
-    if choice == "1":
-        if cli_filename:
-            filename = cli_filename
-            cli_filename = None  # consume the CLI argument so it's only used once
+    while True:
+        print("\nDocument Analyzer")
+        print("-----------------")
+        print("1. Summarise a document")
+        print("2. Open past summary")
+        print("3. Quit")
+        choice = input("Enter the number that matches your chosen option: ")
+
+        if choice == "1":
+            if cli_filename:
+                filename = cli_filename
+                cli_filename = None  # consume the CLI argument so it's only used once
+            else:
+                filename = input("\nEnter filename: ")
+            summarise_flow(client, console, filename, debug)
+
+        elif choice == "2":
+            browse_flow(client, console, debug)
+
+        elif choice == "3":
+            print("\nExiting...")
+            exit(0)
+
         else:
-            filename = input("\nEnter filename: ")
-        summarise_flow(client, console, filename)
+            print("Invalid option, please enter an option in the below list")
 
-    elif choice == "2":
-        browse_flow(client, console)
-
-    elif choice == "3":
-        print("\nExiting...")
-        exit(0)
-
-    else:
-        print("Invalid option, please enter an option in the below list")
+if __name__ == "__main__":
+    main()
+    
