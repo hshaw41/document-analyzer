@@ -26,3 +26,12 @@ __pycache__/
 # Local-only (not tracked)
 CLAUDE.md
 excalidraw.log
+
+# Matt Pocock teach skill (local-only) and its generated teaching workspace
+/.claude/skills/teach/
+/MISSION.md
+/RESOURCES.md
+/NOTES.md
+/lessons/
+/learning-records/
+/reference/
