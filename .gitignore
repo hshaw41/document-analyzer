@@ -11,24 +11,19 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Project Specific
-\week4_document_analyzer_plan.md
-\test_doc_long.txt
-\test_doc_short.txt
-\test_doc_tiny.txt
-\test_doc.pdf
-\test_doc.docx
-\test_doc.rtf
+# Project Specific 
 \docs
 \summaries
 .aider*
 
 # Local-only (not tracked)
 CLAUDE.md
+AGENTS.md
 excalidraw.log
 
 # Matt Pocock skills (local-only) and the teach skill's generated teaching workspace
 /.claude/skills/
+/.agents/skills/
 /skills-lock.json
 /MISSION.md
 /RESOURCES.md
