@@ -1,3 +1,9 @@
+import time
+import os
+import json
+import argparse
+from datetime import datetime, timezone
+
 import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
@@ -6,12 +12,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from striprtf.striprtf import rtf_to_text
-from datetime import datetime, timezone
-import time
 import pymupdf
-import os
-import json
-import argparse
+
 import config
 
 load_dotenv()
