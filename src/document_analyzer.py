@@ -1,3 +1,9 @@
+import time
+import os
+import json
+import argparse
+from datetime import datetime, timezone
+
 import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
@@ -6,30 +12,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from striprtf.striprtf import rtf_to_text
-from datetime import datetime, timezone
-import time
 import pymupdf
-import os
-import json
-import argparse
+
+import config
 
 load_dotenv()
 
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-
-# Per-million-token pricing for each supported model
-MODEL_PRICING = {
-    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
-    "claude-opus-4-5": {"input": 5.00, "output": 25.00}
-}
-
-MODEL = "claude-haiku-4-5"
-CHUNK_SIZE = 40000           # target tokens per chunk for long documents
-CHARS_PER_TOKEN = 4          # rough character-to-token ratio for estimation
-THINKING_BUDGET = 10000      # token budget for extended thinking when enabled
 
 # Summarisation system prompts, keyed by depth level
 SUMMARY_PROMPTS = {
@@ -110,7 +101,7 @@ def chunk_document(document, chunk_size):
     current_position = 0
 
     while current_position < len(document):
-        split_point = current_position + (chunk_size * CHARS_PER_TOKEN)
+        split_point = current_position + (chunk_size * config.CHARS_PER_TOKEN)
 
         if split_point < len(document):
             # Try progressively less ideal break points
@@ -162,7 +153,7 @@ def display_debug_info(model, char_count, estimated_tokens, input_tokens, output
 # API
 # ──────────────────────────────────────────────
 
-def get_claude_response(client, messages, system_prompt, temperature=1.0, model=MODEL, max_tokens=4096, output_config=None, thinking_budget=None):
+def get_claude_response(client, messages, system_prompt, temperature=1.0, model=config.MODEL, max_tokens=4096, output_config=None, thinking_budget=None):
     """Send a request to the Claude API and return the raw response.
 
     Returns the raw response object (use .parse() for the message, .headers for rate limit info).
@@ -204,10 +195,10 @@ def get_claude_response(client, messages, system_prompt, temperature=1.0, model=
     raise last_error
 
 
-def calculate_response_cost(response, model=MODEL):
+def calculate_response_cost(response, model=config.MODEL):
     """Calculate the input and output cost of an API response in dollars."""
-    input_cost = (response.usage.input_tokens / 1_000_000) * MODEL_PRICING[model]["input"]
-    output_cost = (response.usage.output_tokens / 1_000_000) * MODEL_PRICING[model]["output"]
+    input_cost = (response.usage.input_tokens / 1_000_000) * config.MODEL_PRICING[model]["input"]
+    output_cost = (response.usage.output_tokens / 1_000_000) * config.MODEL_PRICING[model]["output"]
     return input_cost, output_cost
 
 # ──────────────────────────────────────────────
@@ -223,7 +214,7 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
     chunk_summaries is None on success, or a list of individual chunk summary strings on partial failure
     (used by the caller to save progress for resume). Returns None on total failure.
     """
-    chunked_document = chunk_document(document, CHUNK_SIZE)
+    chunked_document = chunk_document(document, config.CHUNK_SIZE)
     chunks = len(chunked_document)
 
     # Track individual chunk summaries for resume-on-failure support
@@ -244,7 +235,7 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
     input_tokens = 0
     output_tokens = 0
 
-    thinking_budget = THINKING_BUDGET if extended_thinking else None
+    thinking_budget = config.THINKING_BUDGET if extended_thinking else None
 
     # ── Single-chunk path (no map-reduce needed) ──
 
@@ -422,7 +413,7 @@ def get_or_generate_summary(client, filename, document, prompt_type, extended_th
 
     display_summary_info(tldr, key_terms)
     if debug:
-        display_debug_info(MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
+        display_debug_info(config.MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
 
     # Save progress — either partial (for resume) or complete
     if chunk_summaries:
@@ -643,7 +634,7 @@ def browse_flow(client, console, debug):
 
 def qa_mode(client, console, filename, summary, prompt_type, extended_thinking):
     """Interactive Q&A loop grounded in the document summary. Maintains conversation history within the session."""
-    thinking_budget = THINKING_BUDGET if extended_thinking else None
+    thinking_budget = config.THINKING_BUDGET if extended_thinking else None
     system_prompt = QANDA_PROMPTS[prompt_type] + f"\n\nDocument Summary: {summary}"
 
     print(f"\nQ&A Mode: {filename} ({prompt_type})")
