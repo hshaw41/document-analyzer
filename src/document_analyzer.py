@@ -9,12 +9,11 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
-from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
-from striprtf.striprtf import rtf_to_text
 import pymupdf
 
 import config
+from extraction import get_document
 
 load_dotenv()
 
@@ -63,33 +62,6 @@ SUMMARY_OUTPUT_CONFIG = {
 # ──────────────────────────────────────────────
 # Utilities
 # ──────────────────────────────────────────────
-
-def get_document(filename):
-    """Extract and return all text from a document file.
-
-    Supports PDF, DOCX, RTF, plain text and Markdown.
-    Raises ValueError for unsupported file types.
-    """
-    if filename.endswith(".pdf"):
-        doc = pymupdf.open(filename)
-        document = ""
-        for page in doc:
-            document += "\n" + page.get_text()
-    elif filename.endswith(".docx"):
-        doc = Document(filename)
-        document = ""
-        for paragraph in doc.paragraphs:
-            document += "\n" + paragraph.text
-    elif filename.endswith(".rtf"):
-        with open(filename, "r") as f:
-            document = rtf_to_text(f.read())
-    elif filename.endswith((".txt", ".md")):
-        with open(filename, "r") as f:
-            document = f.read()
-    else:
-        raise ValueError(f"Unsupported file type: {filename}")
-    return document
-
 
 def chunk_document(document, chunk_size):
     """Split a document string into chunks of approximately chunk_size tokens.
