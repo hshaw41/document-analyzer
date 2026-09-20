@@ -14,6 +14,7 @@ import pymupdf
 
 import config
 from extraction import get_document
+from claude_client import get_claude_response, calculate_response_cost, API_ERRORS
 
 load_dotenv()
 
@@ -38,9 +39,6 @@ QANDA_PROMPTS = {
 # Instructions appended to prompts for the reduce step and structured output
 REDUCE_INSTRUCTIONS = " You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
 SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS = "In the tldr field place a one sentence overview of the document. In the key_terms field, list the technical terms and concepts of the document. Place the full summary in the summary field."
-
-# Tuple of API exceptions caught throughout the app for graceful error handling
-API_ERRORS = (anthropic.APIConnectionError, anthropic.APIError, anthropic.APITimeoutError, anthropic.RateLimitError)
 
 # JSON schema enforcing structured output from the summarisation API call
 SUMMARY_OUTPUT_CONFIG = {
@@ -120,58 +118,6 @@ def display_debug_info(model, char_count, estimated_tokens, input_tokens, output
         print(f"Chunks: {chunks}")
     if input_cost and output_cost:
         print(f"Cost: ${input_cost:.6f} in / ${output_cost:.6f} out / ${(input_cost + output_cost):.6f} total")
-
-# ──────────────────────────────────────────────
-# API
-# ──────────────────────────────────────────────
-
-def get_claude_response(client, messages, system_prompt, temperature=1.0, model=config.MODEL, max_tokens=4096, output_config=None, thinking_budget=None):
-    """Send a request to the Claude API and return the raw response.
-
-    Returns the raw response object (use .parse() for the message, .headers for rate limit info).
-    Retries up to 3 times on rate limit errors, using the retry-after header when available.
-    When thinking_budget is set, extended thinking is enabled and max_tokens is increased accordingly.
-    """
-    kwargs = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-        "system": system_prompt,
-        "temperature": temperature,
-    }
-
-    if output_config:
-        kwargs["output_config"] = output_config
-
-    if thinking_budget:
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-        kwargs["max_tokens"] = max_tokens + thinking_budget
-        if temperature != 1.0:
-            print("Warning: can't have temperature below 1.0 when thinking is enabled. Setting back to 1.0")
-            kwargs["temperature"] = 1.0
-
-    attempts = 3
-    for attempt in range(attempts):
-        try:
-            message = client.messages.with_raw_response.create(**kwargs)
-            return message
-        except anthropic.RateLimitError as e:
-            last_error = e
-            print(f"API Rate limit error. Attempt {attempt + 1}/{attempts} failed. Retrying...")
-            retry_after = e.response.headers.get("retry-after")
-            if retry_after:
-                time.sleep(float(retry_after))
-            else:
-                time.sleep(60)
-
-    raise last_error
-
-
-def calculate_response_cost(response, model=config.MODEL):
-    """Calculate the input and output cost of an API response in dollars."""
-    input_cost = (response.usage.input_tokens / 1_000_000) * config.MODEL_PRICING[model]["input"]
-    output_cost = (response.usage.output_tokens / 1_000_000) * config.MODEL_PRICING[model]["output"]
-    return input_cost, output_cost
 
 # ──────────────────────────────────────────────
 # Core Summarisation Logic
