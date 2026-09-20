@@ -1,21 +1,18 @@
-import time
 import os
 import json
 import argparse
-from datetime import datetime, timezone
 
 import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from docx.opc.exceptions import PackageNotFoundError
 import pymupdf
 
 import config
 from extraction import get_document
-from claude_client import get_claude_response, calculate_response_cost, API_ERRORS
-from engine import chunk_document
+from claude_client import get_claude_response, API_ERRORS
+from engine import summarise_document, SUMMARY_PROMPTS
 
 load_dotenv()
 
@@ -23,39 +20,11 @@ load_dotenv()
 # Configuration
 # ──────────────────────────────────────────────
 
-# Summarisation system prompts, keyed by depth level
-SUMMARY_PROMPTS = {
-    "simple": "You are a science communicator who explains complex research to general audiences. summarise this document using no jargon, simple analogies, and plain language. The goal is for the reader to understand what the document covers and why it matters in less than five minutes. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
-    "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. summarise this document with full technical detail, explaining why each concept, method, and result matters. The goal is for the reader to fully understand the paper's contributions, methods, and results. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating.",
-    "expert": "You are a research scientist summarizing a paper for a knowledgeable peer. Provide a research-grade summary including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal is to give the reader a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your summary strictly on the content of the provided document. If something is unclear or not covered in the document, say so rather than speculating."
-}
-
 # Q&A system prompts — tone matches the summary preset so answers feel consistent
 QANDA_PROMPTS = {
     "simple": "You are a science communicator who explains complex research to general audiences. From a document summary answer questions about the summary using no jargon, simple analogies, and plain language. The goal of this discussion is to gain an understanding of what the document covers and why it matters in less than a 10 minute conversation. Base your answers strictly on the content of the summary. If something is unclear or not covered by the summary, say so rather than speculating.",
     "in_depth": "You are a technical writer who explains research clearly without sacrificing accuracy. From a document summary answer questions about that summary with full technical detail, explaining why each concept, method and result matters. The goal of this conversation is for the user to fully understand the paper's contributions, methods and results. Base your answers strictly on the content of the provided summary of a research paper. If something is unclear or not covered by the summary, say so rather than speculating.",
     "expert": "You are a research scientist discussing a paper with a knowledgeable peer. Provide research-grade answers to the user's questions including limitations, implementation details, comparisons to related work, and mathematical or architectural specifics. The goal of this conversation is to give the user a deep enough understanding to consider implementing or reproducing ideas from the paper. Base your answers strictly on the content of the provided summary of a research paper. If something is unclear or not covered by the summary, say so rather than speculating."
-}
-
-# Instructions appended to prompts for the reduce step and structured output
-REDUCE_INSTRUCTIONS = " You will receive multiple summaries of sections of a large document. Combine them into one coherent summary."
-SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS = "In the tldr field place a one sentence overview of the document. In the key_terms field, list the technical terms and concepts of the document. Place the full summary in the summary field."
-
-# JSON schema enforcing structured output from the summarisation API call
-SUMMARY_OUTPUT_CONFIG = {
-    "format": {
-        "type": "json_schema",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "tldr": {"type": "string"},
-                "key_terms": {"type": "array", "items": {"type": "string"}},
-                "summary": {"type": "string"}
-            },
-            "required": ["tldr", "key_terms", "summary"],
-            "additionalProperties": False
-        }
-    }
 }
 
 # ──────────────────────────────────────────────
@@ -86,176 +55,6 @@ def display_debug_info(model, char_count, estimated_tokens, input_tokens, output
 # ──────────────────────────────────────────────
 # Core Summarisation Logic
 # ──────────────────────────────────────────────
-
-def summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries=None):
-    """Summarise a document using a map-reduce approach for multi-chunk documents.
-
-    Returns a 9-tuple on success or partial failure:
-        (summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries)
-
-    chunk_summaries is None on success, or a list of individual chunk summary strings on partial failure
-    (used by the caller to save progress for resume). Returns None on total failure.
-    """
-    chunked_document = chunk_document(document, config.CHUNK_SIZE)
-    chunks = len(chunked_document)
-
-    # Track individual chunk summaries for resume-on-failure support
-    chunk_summaries = []
-
-    # Restore progress from a previous failed attempt if available
-    if saved_chunk_summaries:
-        chunk_summaries = saved_chunk_summaries
-        summaries = "\n\n".join(saved_chunk_summaries)
-        start_index = len(saved_chunk_summaries)
-    else:
-        summaries = ""
-        start_index = 0
-
-    # Running totals for cost and token tracking
-    input_cost = 0
-    output_cost = 0
-    input_tokens = 0
-    output_tokens = 0
-
-    thinking_budget = config.THINKING_BUDGET if extended_thinking else None
-
-    # ── Single-chunk path (no map-reduce needed) ──
-
-    if chunks == 1:
-        system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
-        messages = [{"role": "user", "content": document}]
-
-        try:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}"),
-                TimeElapsedColumn(),
-            )
-            with progress:
-                task = progress.add_task("Summarising...", total=None)
-                response = get_claude_response(client, messages, system_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
-
-            message = response.parse()
-            message_text = next(block.text for block in message.content if block.type == "text")
-            input_cost, output_cost = calculate_response_cost(message)
-            input_tokens = message.usage.input_tokens
-            output_tokens = message.usage.output_tokens
-            result = json.loads(message_text)
-            summary = result["summary"]
-            tldr = result["tldr"]
-            key_terms = result["key_terms"]
-        except API_ERRORS as e:
-            print(f"Failed to summarise: {e}")
-            print("There has been no API cost for this summary.")
-            return None
-
-    # ── Multi-chunk path (map individual chunks, then reduce) ──
-
-    else:
-        map_prompt = SUMMARY_PROMPTS[prompt_type]
-        tokens_remaining = 50000
-        reset_time_utc = datetime.now(timezone.utc)
-
-        print()
-
-        # Map step — summarise each chunk individually
-        try:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}"),
-                BarColumn(),
-                TimeElapsedColumn(),
-            )
-            with progress:
-                if saved_chunk_summaries:
-                    task = progress.add_task(f"Resuming from chunk {start_index + 1}...", total=chunks)
-                    progress.update(task, completed=start_index)
-                else:
-                    task = progress.add_task("Starting...", total=chunks)
-
-                for i, chunk in enumerate(chunked_document):
-                    if i < start_index:
-                        continue
-
-                    progress.update(task, description=f"Summarising Chunk {i + 1}/{chunks}")
-                    messages = [{"role": "user", "content": chunk}]
-
-                    # Proactive rate limit wait — sleep if remaining tokens are too low for the next chunk
-                    estimated_next_tokens = (len(chunk) + len(map_prompt)) / 4
-                    if tokens_remaining < estimated_next_tokens:
-                        wait_seconds = (reset_time_utc - datetime.now(timezone.utc)).total_seconds()
-                        if wait_seconds > 0:
-                            time.sleep(wait_seconds)
-
-                    response = get_claude_response(client, messages, map_prompt, thinking_budget=thinking_budget)
-                    progress.advance(task)
-
-                    message = response.parse()
-                    message_text = next(block.text for block in message.content if block.type == "text")
-                    chunk_summaries.append(message_text)
-                    summaries += "\n\n" + message_text
-
-                    # Accumulate costs and tokens
-                    chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
-                    input_cost += chunk_input_cost
-                    output_cost += chunk_output_cost
-                    input_tokens += message.usage.input_tokens
-                    output_tokens += message.usage.output_tokens
-
-                    # Read rate limit headers for proactive waiting on next iteration
-                    tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
-                    reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
-                    reset_time_utc = datetime.fromisoformat(reset_time_string)
-
-        except API_ERRORS as e:
-            print(f"Failed on chunk {i + 1}/{chunks}")
-            if not chunk_summaries:
-                print("No chunks summarised.")
-                print("There has been no API cost for this summary.")
-                return None
-            else:
-                print(f"Attempting partial summary from {i} completed chunks.")
-
-        # Reduce step — combine all chunk summaries into a single final summary
-        reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
-        messages = [{"role": "user", "content": summaries}]
-
-        try:
-            estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}"),
-                TimeElapsedColumn(),
-            )
-            with progress:
-                task = progress.add_task("Generating final summary...", total=None)
-
-                if tokens_remaining < estimated_next_tokens:
-                    wait_seconds = (reset_time_utc - datetime.now(timezone.utc)).total_seconds()
-                    if wait_seconds > 0:
-                        time.sleep(wait_seconds)
-
-                response = get_claude_response(client, messages, reduce_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
-
-            message = response.parse()
-            message_text = next(block.text for block in message.content if block.type == "text")
-            final_input_cost, final_output_cost = calculate_response_cost(message)
-            input_cost += final_input_cost
-            output_cost += final_output_cost
-            input_tokens += message.usage.input_tokens
-            output_tokens += message.usage.output_tokens
-            result = json.loads(message_text)
-            summary = result["summary"]
-            tldr = result["tldr"]
-            key_terms = result["key_terms"]
-
-        except API_ERRORS as e:
-            print("Failed to combine summaries.")
-            print("Displaying successful chunk summaries")
-            return summaries, None, None, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries
-
-    return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, None
-
 
 def get_or_generate_summary(client, filename, document, prompt_type, extended_thinking, debug):
     """Retrieve a cached summary or generate a new one.
