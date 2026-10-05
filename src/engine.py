@@ -50,6 +50,7 @@ class SummaryStats:
 class SummaryResult:
     status: str                              # "complete" | "partial" | "failed" — checked first by every caller
     error: str | None = None                 # str(e); None on success; display-only
+    failed_chunk: int | None = None          # failed chunk index; tells caller which chunk errored
     summary: str | None = None
     tldr: str | None = None
     key_terms: list[str] | None = None
@@ -102,27 +103,20 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
     """
 
     summary_stats = SummaryStats()
+    summary_result = SummaryResult(status = "complete", stats = summary_stats)
 
     chunked_document = chunk_document(document, config.CHUNK_SIZE)
     summary_stats.chunks = len(chunked_document)
 
-    # Track individual chunk summaries for resume-on-failure support
-    chunk_summaries = []
-
     # Restore progress from a previous failed attempt if available
     if saved_chunk_summaries:
-        chunk_summaries = saved_chunk_summaries
+        summary_result.chunk_summaries = saved_chunk_summaries
         summaries = "\n\n".join(saved_chunk_summaries)
         start_index = len(saved_chunk_summaries)
     else:
+        summary_result.chunk_summaries = []
         summaries = ""
         start_index = 0
-
-    # Running totals for cost and token tracking
-    summary_stats.input_cost = 0
-    summary_stats.output_cost = 0
-    summary_stats.input_tokens = 0
-    summary_stats.output_tokens = 0
 
     thinking_budget = config.THINKING_BUDGET if extended_thinking else None
 
@@ -154,14 +148,15 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                 summary_stats.output_tokens = message.usage.output_tokens
 
                 result = json.loads(message_text)
-                summary = result["summary"]
-                tldr = result["tldr"]
-                key_terms = result["key_terms"]
+                summary_result.summary = result["summary"]
+                summary_result.tldr = result["tldr"]
+                summary_result.key_terms = result["key_terms"]
+                summary_result.status = "complete"
 
         except API_ERRORS as e:
-            print(f"Failed to summarise: {e}")
-            print("There has been no API cost for this summary.")
-            return None
+            summary_result.status = "failed"
+            summary_result.error = str(e)
+            return summary_result
 
     # ── Multi-chunk path (map individual chunks, then reduce) ──
 
@@ -169,8 +164,6 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
         map_prompt = SUMMARY_PROMPTS[prompt_type]
         tokens_remaining = 50000
         reset_time_utc = datetime.now(timezone.utc)
-
-        print()
 
         # Map step — summarise each chunk individually
         try:
@@ -207,7 +200,7 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                     message = response.parse()
                     message_text = next(block.text for block in message.content if block.type == "text")
 
-                    chunk_summaries.append(message_text)
+                    summary_result.chunk_summaries.append(message_text)
                     summaries += "\n\n" + message_text
 
                     # Accumulate costs and tokens
@@ -225,35 +218,37 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                     progress.advance(task)
 
         except API_ERRORS as e:
-            print(f"Failed on chunk {i + 1}/{summary_stats.chunks}")
-            if not chunk_summaries:
-                print("No chunks summarised.")
-                print("There has been no API cost for this summary.")
-                return None
+            summary_result.error = str(e)
+            summary_result.failed_chunk = i + 1
+            if not summary_result.chunk_summaries:
+                summary_result.status = "failed"
+                return summary_result
             else:
-                print(f"Attempting partial summary from {i} completed chunks.")
+                summary_result.status = "partial"
 
         # Reduce step — combine all chunk summaries into a single final summary
         reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         messages = [{"role": "user", "content": summaries}]
 
         try:
-            estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
+            
             progress = Progress(
                 SpinnerColumn(),
                 TextColumn("{task.description}"),
                 TimeElapsedColumn(),
             )
+
             with progress:
+
                 task = progress.add_task("Generating final summary...", total=None)
 
+                estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
                 if tokens_remaining < estimated_next_tokens:
                     wait_seconds = (reset_time_utc - datetime.now(timezone.utc)).total_seconds()
                     if wait_seconds > 0:
                         time.sleep(wait_seconds)
 
                 response = get_claude_response(client, messages, reduce_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
-
                 message = response.parse()
                 message_text = next(block.text for block in message.content if block.type == "text")
 
@@ -264,13 +259,16 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                 summary_stats.output_tokens += message.usage.output_tokens
 
                 result = json.loads(message_text)
-                summary = result["summary"]
-                tldr = result["tldr"]
-                key_terms = result["key_terms"]
+                summary_result.summary = result["summary"]
+                summary_result.tldr = result["tldr"]
+                summary_result.key_terms = result["key_terms"]
+                summary_result.status = "complete"
+                summary_result.chunk_summaries = None
+                summary_result.error = None
 
         except API_ERRORS as e:
-            print("Failed to combine summaries.")
-            print("Displaying successful chunk summaries")
-            return summaries, None, None, summary_stats, chunk_summaries
-
-    return summary, tldr, key_terms, summary_stats, None
+            summary_result.status = "partial"
+            summary_result.error = str(e)
+            return summary_result
+        
+    return summary_result
