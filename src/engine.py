@@ -1,6 +1,7 @@
 import json
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
@@ -34,6 +35,29 @@ SUMMARY_OUTPUT_CONFIG = {
         }
     }
 }
+
+
+@dataclass
+class SummaryStats:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_cost: float = 0.0
+    output_cost: float = 0.0
+    chunks: int = 0
+
+
+@dataclass
+class SummaryResult:
+    status: str                              # "complete" | "partial" | "failed" — checked first by every caller
+    error: str | None = None                 # str(e); None on success; display-only
+    failed_chunk: int | None = None          # failed chunk index; tells caller which chunk errored
+    summary: str | None = None
+    tldr: str | None = None
+    key_terms: list[str] | None = None
+    chunk_summaries: list[str] | None = None # None unless partial; the resume payload, consumed only by services
+    stats: SummaryStats = field(default_factory=SummaryStats)
+    from_cache: bool = False                 # set True when services builds the result from a cache hit
+
 
 def chunk_document(document, chunk_size):
     """Split a document string into chunks of approximately chunk_size tokens.
@@ -70,65 +94,64 @@ def chunk_document(document, chunk_size):
 
 def summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries=None):
     """Summarise a document using a map-reduce approach for multi-chunk documents.
-
-    Returns a 9-tuple on success or partial failure:
-        (summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries)
-
-    chunk_summaries is None on success, or a list of individual chunk summary strings on partial failure
-    (used by the caller to save progress for resume). Returns None on total failure.
+       Returns SummaryResult dataclass
     """
-    chunked_document = chunk_document(document, config.CHUNK_SIZE)
-    chunks = len(chunked_document)
 
-    # Track individual chunk summaries for resume-on-failure support
-    chunk_summaries = []
+    summary_stats = SummaryStats()
+    summary_result = SummaryResult(status = "complete", stats = summary_stats)
+
+    chunked_document = chunk_document(document, config.CHUNK_SIZE)
+    summary_stats.chunks = len(chunked_document)
 
     # Restore progress from a previous failed attempt if available
     if saved_chunk_summaries:
-        chunk_summaries = saved_chunk_summaries
+        summary_result.chunk_summaries = saved_chunk_summaries
         summaries = "\n\n".join(saved_chunk_summaries)
         start_index = len(saved_chunk_summaries)
     else:
+        summary_result.chunk_summaries = []
         summaries = ""
         start_index = 0
-
-    # Running totals for cost and token tracking
-    input_cost = 0
-    output_cost = 0
-    input_tokens = 0
-    output_tokens = 0
 
     thinking_budget = config.THINKING_BUDGET if extended_thinking else None
 
     # ── Single-chunk path (no map-reduce needed) ──
 
-    if chunks == 1:
+    if summary_stats.chunks == 1:
         system_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS
-        messages = [{"role": "user", "content": document}]
+        
 
         try:
+
             progress = Progress(
                 SpinnerColumn(),
                 TextColumn("{task.description}"),
                 TimeElapsedColumn(),
             )
+
             with progress:
                 task = progress.add_task("Summarising...", total=None)
+
+                messages = [{"role": "user", "content": document}]
                 response = get_claude_response(client, messages, system_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
 
-            message = response.parse()
-            message_text = next(block.text for block in message.content if block.type == "text")
-            input_cost, output_cost = calculate_response_cost(message)
-            input_tokens = message.usage.input_tokens
-            output_tokens = message.usage.output_tokens
-            result = json.loads(message_text)
-            summary = result["summary"]
-            tldr = result["tldr"]
-            key_terms = result["key_terms"]
+                message = response.parse()
+                message_text = next(block.text for block in message.content if block.type == "text")
+
+                summary_stats.input_cost, summary_stats.output_cost = calculate_response_cost(message)
+                summary_stats.input_tokens = message.usage.input_tokens
+                summary_stats.output_tokens = message.usage.output_tokens
+
+                result = json.loads(message_text)
+                summary_result.summary = result["summary"]
+                summary_result.tldr = result["tldr"]
+                summary_result.key_terms = result["key_terms"]
+                summary_result.status = "complete"
+
         except API_ERRORS as e:
-            print(f"Failed to summarise: {e}")
-            print("There has been no API cost for this summary.")
-            return None
+            summary_result.status = "failed"
+            summary_result.error = str(e)
+            return summary_result
 
     # ── Multi-chunk path (map individual chunks, then reduce) ──
 
@@ -137,30 +160,29 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
         tokens_remaining = 50000
         reset_time_utc = datetime.now(timezone.utc)
 
-        print()
-
         # Map step — summarise each chunk individually
         try:
+
             progress = Progress(
                 SpinnerColumn(),
                 TextColumn("{task.description}"),
                 BarColumn(),
                 TimeElapsedColumn(),
             )
+
             with progress:
                 if saved_chunk_summaries:
-                    task = progress.add_task(f"Resuming from chunk {start_index + 1}...", total=chunks)
+                    task = progress.add_task(f"Resuming from chunk {start_index + 1}...", total=summary_stats.chunks)
                     progress.update(task, completed=start_index)
                 else:
-                    task = progress.add_task("Starting...", total=chunks)
+                    task = progress.add_task("Starting...", total=summary_stats.chunks)
 
                 for i, chunk in enumerate(chunked_document):
                     if i < start_index:
                         continue
 
-                    progress.update(task, description=f"Summarising Chunk {i + 1}/{chunks}")
-                    messages = [{"role": "user", "content": chunk}]
-
+                    progress.update(task, description=f"Summarising Chunk {i + 1}/{summary_stats.chunks}")
+                    
                     # Proactive rate limit wait — sleep if remaining tokens are too low for the next chunk
                     estimated_next_tokens = (len(chunk) + len(map_prompt)) / 4
                     if tokens_remaining < estimated_next_tokens:
@@ -168,71 +190,80 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                         if wait_seconds > 0:
                             time.sleep(wait_seconds)
 
+                    messages = [{"role": "user", "content": chunk}]
                     response = get_claude_response(client, messages, map_prompt, thinking_budget=thinking_budget)
-                    progress.advance(task)
-
                     message = response.parse()
                     message_text = next(block.text for block in message.content if block.type == "text")
-                    chunk_summaries.append(message_text)
+
+                    summary_result.chunk_summaries.append(message_text)
                     summaries += "\n\n" + message_text
 
                     # Accumulate costs and tokens
                     chunk_input_cost, chunk_output_cost = calculate_response_cost(message)
-                    input_cost += chunk_input_cost
-                    output_cost += chunk_output_cost
-                    input_tokens += message.usage.input_tokens
-                    output_tokens += message.usage.output_tokens
+                    summary_stats.input_cost += chunk_input_cost
+                    summary_stats.output_cost += chunk_output_cost
+                    summary_stats.input_tokens += message.usage.input_tokens
+                    summary_stats.output_tokens += message.usage.output_tokens
 
                     # Read rate limit headers for proactive waiting on next iteration
                     tokens_remaining = int(response.headers.get("anthropic-ratelimit-input-tokens-remaining"))
                     reset_time_string = response.headers.get("anthropic-ratelimit-input-tokens-reset")
                     reset_time_utc = datetime.fromisoformat(reset_time_string)
 
+                    progress.advance(task)
+
         except API_ERRORS as e:
-            print(f"Failed on chunk {i + 1}/{chunks}")
-            if not chunk_summaries:
-                print("No chunks summarised.")
-                print("There has been no API cost for this summary.")
-                return None
-            else:
-                print(f"Attempting partial summary from {i} completed chunks.")
+            summary_result.error = str(e)
+            summary_result.failed_chunk = i + 1
+            if not summary_result.chunk_summaries:
+                summary_result.status = "failed"
+                return summary_result
 
         # Reduce step — combine all chunk summaries into a single final summary
+        summary_result.failed_chunk
         reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         messages = [{"role": "user", "content": summaries}]
 
         try:
-            estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
+            
             progress = Progress(
                 SpinnerColumn(),
                 TextColumn("{task.description}"),
                 TimeElapsedColumn(),
             )
+
             with progress:
+
                 task = progress.add_task("Generating final summary...", total=None)
 
+                estimated_next_tokens = (len(summaries) + len(reduce_prompt)) / 4
                 if tokens_remaining < estimated_next_tokens:
                     wait_seconds = (reset_time_utc - datetime.now(timezone.utc)).total_seconds()
                     if wait_seconds > 0:
                         time.sleep(wait_seconds)
 
                 response = get_claude_response(client, messages, reduce_prompt, output_config=SUMMARY_OUTPUT_CONFIG, thinking_budget=thinking_budget)
+                message = response.parse()
+                message_text = next(block.text for block in message.content if block.type == "text")
 
-            message = response.parse()
-            message_text = next(block.text for block in message.content if block.type == "text")
-            final_input_cost, final_output_cost = calculate_response_cost(message)
-            input_cost += final_input_cost
-            output_cost += final_output_cost
-            input_tokens += message.usage.input_tokens
-            output_tokens += message.usage.output_tokens
-            result = json.loads(message_text)
-            summary = result["summary"]
-            tldr = result["tldr"]
-            key_terms = result["key_terms"]
+                final_input_cost, final_output_cost = calculate_response_cost(message)
+                summary_stats.input_cost += final_input_cost
+                summary_stats.output_cost += final_output_cost
+                summary_stats.input_tokens += message.usage.input_tokens
+                summary_stats.output_tokens += message.usage.output_tokens
+
+                result = json.loads(message_text)
+                summary_result.summary = result["summary"]
+                summary_result.tldr = result["tldr"]
+                summary_result.key_terms = result["key_terms"]
+                summary_result.status = "complete"
+                summary_result.chunk_summaries = None
+                summary_result.error = None
+
 
         except API_ERRORS as e:
-            print("Failed to combine summaries.")
-            print("Displaying successful chunk summaries")
-            return summaries, None, None, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries
-
-    return summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, None
+            summary_result.status = "partial"
+            summary_result.error = str(e)
+            return summary_result
+        
+    return summary_result
