@@ -94,12 +94,7 @@ def chunk_document(document, chunk_size):
 
 def summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries=None):
     """Summarise a document using a map-reduce approach for multi-chunk documents.
-
-    Returns a 9-tuple on success or partial failure:
-        (summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries)
-
-    chunk_summaries is None on success, or a list of individual chunk summary strings on partial failure
-    (used by the caller to save progress for resume). Returns None on total failure.
+       Returns SummaryResult dataclass
     """
 
     summary_stats = SummaryStats()
@@ -223,10 +218,9 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
             if not summary_result.chunk_summaries:
                 summary_result.status = "failed"
                 return summary_result
-            else:
-                summary_result.status = "partial"
 
         # Reduce step — combine all chunk summaries into a single final summary
+        summary_result.failed_chunk
         reduce_prompt = SUMMARY_PROMPTS[prompt_type] + SUMMARY_STRUCTURED_OUTPUT_INSTRUCTIONS + REDUCE_INSTRUCTIONS
         messages = [{"role": "user", "content": summaries}]
 
@@ -265,6 +259,7 @@ def summarise_document(client, document, prompt_type, extended_thinking, saved_c
                 summary_result.status = "complete"
                 summary_result.chunk_summaries = None
                 summary_result.error = None
+
 
         except API_ERRORS as e:
             summary_result.status = "partial"

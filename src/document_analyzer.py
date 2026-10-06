@@ -87,23 +87,32 @@ def get_or_generate_summary(client, filename, document, prompt_type, extended_th
 
     # Generate a new summary (with or without resumed progress)
     summary_result = summarise_document(client, document, prompt_type, extended_thinking, saved_chunk_summaries)
-    if not summary_result:
-        return None
 
-    summary, tldr, key_terms, input_tokens, output_tokens, chunks, input_cost, output_cost, chunk_summaries = summary_result
-
-    display_summary_info(tldr, key_terms)
-    if debug:
-        display_debug_info(config.MODEL, char_count, estimated_tokens, input_tokens, output_tokens, chunks, input_cost, output_cost)
-
-    # Save progress — either partial (for resume) or complete
-    if chunk_summaries:
-        save_partial_summaries(filename, chunk_summaries, prompt_type)
-    else:
+    if summary_result.status == "failed":
+        print(f"Failed to summarise: {summary_result.error}")
+        if summary_result.failed_chunk:
+            print(f"Failed on chunk {summary_result.failed_chunk}")
+        return
+    elif summary_result.status == "partial":
+        print(f"Failed to combine summaries: {summary_result.error}.")
+        print(f"Saving completed chunk summaries so summary can be resumed on a future run.")
+        if summary_result.failed_chunk:
+            print(f"Failed on chunk {summary_result.failed_chunk}")
+        save_partial_summaries(filename, summary_result.chunk_summaries, prompt_type)
+        return "\n\n".join(summary_result.chunk_summaries)
+    elif summary_result.status == "complete":
+        if summary_result.failed_chunk:
+            print(f"Summarisation failed on chunk {summary_result.failed_chunk}. Combined successful summaries only.")
+        display_summary_info(summary_result.tldr, summary_result.key_terms)
+        if debug:
+            display_debug_info(config.MODEL, char_count, estimated_tokens, summary_result.stats.input_tokens, summary_result.stats.output_tokens, summary_result.stats.chunks, summary_result.stats.input_cost, summary_result.stats.output_cost)
         clear_partial_summaries(filename)
-        save_summary(filename, summary, prompt_type, tldr, key_terms)
+        save_summary(filename, summary_result.summary, prompt_type, summary_result.tldr, summary_result.key_terms)
+    else:
+        print("Unknown Status. Summary Failed")
+        return
 
-    return summary
+    return summary_result.summary
 
 # ──────────────────────────────────────────────
 # Persistence
